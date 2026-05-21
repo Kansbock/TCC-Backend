@@ -6,6 +6,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import tcc.aves.dto.UserRequest;
 import tcc.aves.dto.UserResponse;
+import tcc.aves.dto.UserUpdateRequest;
 import tcc.aves.service.UserService;
 
 @RestController
@@ -31,7 +32,7 @@ public class UserController {
 
     @PutMapping("/{id}")
     public ResponseEntity<UserResponse> update(@PathVariable Long id,
-                                                @Valid @RequestBody UserRequest request) {
+                                                @Valid @RequestBody UserUpdateRequest request) {
         return ResponseEntity.ok(userService.update(id, request));
     }
 

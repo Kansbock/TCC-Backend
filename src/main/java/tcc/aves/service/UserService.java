@@ -4,6 +4,7 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import tcc.aves.dto.UserRequest;
 import tcc.aves.dto.UserResponse;
+import tcc.aves.dto.UserUpdateRequest;
 import tcc.aves.model.User;
 import tcc.aves.repository.UserRepository;
 
@@ -24,6 +25,7 @@ public class UserService {
         }
 
         User user = new User();
+        user.setName(request.name());
         user.setEmail(request.email());
         user.setPassword(passwordEncoder.encode(request.password()));
 
@@ -37,7 +39,7 @@ public class UserService {
         return toResponse(user);
     }
 
-    public UserResponse update(Long id, UserRequest request) {
+    public UserResponse update(Long id, UserUpdateRequest request) {
         User user = userRepository.findById(id)
                 .orElseThrow(() -> new IllegalArgumentException("Usuário não encontrado"));
 
@@ -47,8 +49,8 @@ public class UserService {
                     throw new IllegalArgumentException("Email já cadastrado por outro usuário");
                 });
 
+        user.setName(request.name());
         user.setEmail(request.email());
-        user.setPassword(passwordEncoder.encode(request.password()));
 
         User saved = userRepository.save(user);
         return toResponse(saved);
@@ -62,6 +64,12 @@ public class UserService {
     }
 
     private UserResponse toResponse(User user) {
-        return new UserResponse(user.getId(), user.getEmail());
+        return new UserResponse(
+                user.getId(),
+                user.getName(),
+                user.getEmail(),
+                user.getCreatedAt(),
+                user.getUpdatedAt()
+        );
     }
 }

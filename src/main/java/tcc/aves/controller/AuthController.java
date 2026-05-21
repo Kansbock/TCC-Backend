@@ -6,6 +6,7 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.*;
 import tcc.aves.dto.LoginRequest;
 import tcc.aves.dto.LoginResponse;
+import tcc.aves.dto.UserResponse;
 import tcc.aves.model.User;
 import tcc.aves.repository.UserRepository;
 import tcc.aves.security.JwtUtil;
@@ -36,6 +37,13 @@ public class AuthController {
         }
 
         String token = jwtUtil.generateToken(user.getEmail());
-        return ResponseEntity.ok(new LoginResponse(token));
+        UserResponse userResponse = new UserResponse(
+                user.getId(),
+                user.getName(),
+                user.getEmail(),
+                user.getCreatedAt(),
+                user.getUpdatedAt()
+        );
+        return ResponseEntity.ok(new LoginResponse(token, userResponse));
     }
 }

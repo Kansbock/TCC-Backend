@@ -1,7 +1,6 @@
 package tcc.aves.model;
 
 import jakarta.persistence.*;
-import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
 import lombok.*;
 import org.hibernate.annotations.CreationTimestamp;
@@ -10,12 +9,12 @@ import org.hibernate.annotations.UpdateTimestamp;
 import java.time.LocalDateTime;
 
 @Entity
-@Table(name = "users")
+@Table(name = "species")
 @Getter
 @Setter
 @NoArgsConstructor
 @AllArgsConstructor
-public class User {
+public class Species {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -25,14 +24,18 @@ public class User {
     @Column(nullable = false)
     private String name;
 
-    @NotBlank(message = "Email é obrigatório")
-    @Email(message = "Email deve ser válido")
-    @Column(nullable = false, unique = true)
-    private String email;
+    @NotBlank(message = "Nome científico é obrigatório")
+    @Column(name = "scientific_name", nullable = false, unique = true)
+    private String scientificName;
 
-    @NotBlank(message = "Senha é obrigatória")
-    @Column(nullable = false)
-    private String password;
+    @Column(columnDefinition = "TEXT")
+    private String description;
+
+    @Column(columnDefinition = "TEXT")
+    private String tips;
+
+    @Column(name = "image_url")
+    private String imageUrl;
 
     @CreationTimestamp
     @Column(nullable = false, updatable = false)
