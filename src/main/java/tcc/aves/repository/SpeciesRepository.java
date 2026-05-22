@@ -12,5 +12,10 @@ public interface SpeciesRepository extends JpaRepository<Species, Long> {
 
     List<Species> findByNameContainingIgnoreCase(String name);
 
+    List<Species> findByNameContainingIgnoreCaseOrScientificNameContainingIgnoreCase(
+            String name,
+            String scientificName
+    );
+
     boolean existsByScientificName(String scientificName);
 }

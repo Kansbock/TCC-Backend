@@ -42,8 +42,10 @@ public class SpeciesService {
         return toResponse(getOrThrow(id));
     }
 
-    public List<SpeciesResponse> search(String name) {
-        return speciesRepository.findByNameContainingIgnoreCase(name).stream()
+    public List<SpeciesResponse> search(String query) {
+        return speciesRepository
+                .findByNameContainingIgnoreCaseOrScientificNameContainingIgnoreCase(query, query)
+                .stream()
                 .map(this::toResponse)
                 .toList();
     }
