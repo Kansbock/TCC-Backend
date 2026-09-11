@@ -1,19 +1,37 @@
 package tcc.aves.repository;
 
-import org.springframework.data.jpa.repository.JpaRepository;
-import org.springframework.data.jpa.repository.Query;
-import org.springframework.data.repository.query.Param;
-import tcc.aves.model.Sighting;
-
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.util.List;
+import java.util.Optional;
 
-public interface SightingRepository extends JpaRepository<Sighting, Long> {
+/**
+ * Port de persistência de avistamentos. Avistamentos são globais — não há
+ * conceito de proprietário em nenhum método aqui.
+ */
+public interface SightingRepository {
 
-    @Query("SELECT DISTINCT s FROM Sighting s JOIN s.species ss WHERE ss.species.id = :speciesId")
-    List<Sighting> findBySpeciesId(@Param("speciesId") Long speciesId);
+    /**
+     * Cria um avistamento. Todas as espécies em {@code speciesIds} devem
+     * existir; a implementação grava detalhes, referências por espécie e
+     * incrementa {@code referenceCount} das espécies atomicamente. Lança
+     * {@code ResourceNotFoundException} se alguma espécie não existir.
+     */
+    SightingRecord create(List<String> speciesIds, LocalDate date, LocalTime time, String imageUrl);
 
-    List<Sighting> findByDate(LocalDate date);
+    Optional<SightingRecord> findById(String id);
 
-    List<Sighting> findByDateBetween(LocalDate from, LocalDate to);
+    /**
+     * Atualiza um avistamento, ajustando referências e contadores de espécie
+     * conforme a diferença entre a lista antiga e a nova. Lança
+     * {@code ResourceNotFoundException} se o avistamento ou alguma espécie
+     * não existir, ou {@code ConcurrentUpdateException} em conflito de versão.
+     */
+    SightingRecord update(String id, List<String> speciesIds, LocalDate date, LocalTime time, String imageUrl);
+
+    /** Lança {@code ResourceNotFoundException} se o avistamento não existir. */
+    void delete(String id);
+
+    /** Página de avistamentos do mais recente para o mais antigo, conforme os filtros informados. */
+    SightingPage query(SightingQuery query);
 }

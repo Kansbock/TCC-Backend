@@ -35,18 +35,18 @@ public class SpeciesController {
     }
 
     @GetMapping("/{id}")
-    public ResponseEntity<SpeciesResponse> findById(@PathVariable Long id) {
+    public ResponseEntity<SpeciesResponse> findById(@PathVariable String id) {
         return ResponseEntity.ok(speciesService.findById(id));
     }
 
     @PutMapping("/{id}")
-    public ResponseEntity<SpeciesResponse> update(@PathVariable Long id,
+    public ResponseEntity<SpeciesResponse> update(@PathVariable String id,
                                                    @Valid @RequestBody SpeciesRequest request) {
         return ResponseEntity.ok(speciesService.update(id, request));
     }
 
     @DeleteMapping("/{id}")
-    public ResponseEntity<Void> delete(@PathVariable Long id) {
+    public ResponseEntity<Void> delete(@PathVariable String id) {
         speciesService.delete(id);
         return ResponseEntity.noContent().build();
     }

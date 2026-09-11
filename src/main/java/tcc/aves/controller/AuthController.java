@@ -7,7 +7,8 @@ import org.springframework.web.bind.annotation.*;
 import tcc.aves.dto.LoginRequest;
 import tcc.aves.dto.LoginResponse;
 import tcc.aves.dto.UserResponse;
-import tcc.aves.model.User;
+import tcc.aves.exception.InvalidCredentialsException;
+import tcc.aves.repository.UserRecord;
 import tcc.aves.repository.UserRepository;
 import tcc.aves.security.JwtUtil;
 
@@ -29,20 +30,20 @@ public class AuthController {
 
     @PostMapping("/login")
     public ResponseEntity<LoginResponse> login(@Valid @RequestBody LoginRequest request) {
-        User user = userRepository.findByEmail(request.email())
-                .orElseThrow(() -> new IllegalArgumentException("Email ou senha inválidos"));
+        UserRecord user = userRepository.findByEmail(request.email())
+                .orElseThrow(() -> new InvalidCredentialsException("Email ou senha inválidos"));
 
-        if (!passwordEncoder.matches(request.password(), user.getPassword())) {
-            throw new IllegalArgumentException("Email ou senha inválidos");
+        if (!passwordEncoder.matches(request.password(), user.passwordHash())) {
+            throw new InvalidCredentialsException("Email ou senha inválidos");
         }
 
-        String token = jwtUtil.generateToken(user.getEmail());
+        String token = jwtUtil.generateToken(user.id(), user.email());
         UserResponse userResponse = new UserResponse(
-                user.getId(),
-                user.getName(),
-                user.getEmail(),
-                user.getCreatedAt(),
-                user.getUpdatedAt()
+                user.id(),
+                user.name(),
+                user.email(),
+                user.createdAt(),
+                user.updatedAt()
         );
         return ResponseEntity.ok(new LoginResponse(token, userResponse));
     }

@@ -1,0 +1,17 @@
+# Enviar build/ e .gradle/ ao daemon Docker tornaria o contexto ~centenas de MB
+# e, pior, poderia copiar artefatos compilados na máquina local para dentro da
+# imagem, mascarando erros de compilação no estágio de build.
+build/
+.gradle/
+.git/
+.gitignore
+.gitattributes
+
+# node_modules nunca deve existir aqui, mas a entrada protege contra cópia
+# acidental caso o diretório do frontend seja movido para dentro do repo.
+node_modules/
+
+data/
+*.md
+Dockerfile
+.dockerignore

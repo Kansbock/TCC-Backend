@@ -3,7 +3,8 @@ package tcc.aves.service;
 import org.springframework.stereotype.Service;
 import tcc.aves.dto.SpeciesRequest;
 import tcc.aves.dto.SpeciesResponse;
-import tcc.aves.model.Species;
+import tcc.aves.exception.ResourceNotFoundException;
+import tcc.aves.repository.SpeciesRecord;
 import tcc.aves.repository.SpeciesRepository;
 
 import java.util.List;
@@ -18,18 +19,9 @@ public class SpeciesService {
     }
 
     public SpeciesResponse create(SpeciesRequest request) {
-        if (speciesRepository.existsByScientificName(request.scientificName())) {
-            throw new IllegalArgumentException("Nome científico já cadastrado");
-        }
-
-        Species species = new Species();
-        species.setName(request.name());
-        species.setScientificName(request.scientificName());
-        species.setDescription(request.description());
-        species.setTips(request.tips());
-        species.setImageUrl(request.imageUrl());
-
-        return toResponse(speciesRepository.save(species));
+        SpeciesRecord saved = speciesRepository.create(
+                request.name(), request.scientificName(), request.description(), request.tips(), request.imageUrl());
+        return toResponse(saved);
     }
 
     public List<SpeciesResponse> findAll() {
@@ -38,58 +30,38 @@ public class SpeciesService {
                 .toList();
     }
 
-    public SpeciesResponse findById(Long id) {
-        return toResponse(getOrThrow(id));
+    public SpeciesResponse findById(String id) {
+        return speciesRepository.findById(id)
+                .map(this::toResponse)
+                .orElseThrow(() -> new ResourceNotFoundException("Espécie não encontrada"));
     }
 
     public List<SpeciesResponse> search(String query) {
-        return speciesRepository
-                .findByNameContainingIgnoreCaseOrScientificNameContainingIgnoreCase(query, query)
-                .stream()
+        return speciesRepository.search(query).stream()
                 .map(this::toResponse)
                 .toList();
     }
 
-    public SpeciesResponse update(Long id, SpeciesRequest request) {
-        Species species = getOrThrow(id);
-
-        speciesRepository.findByScientificName(request.scientificName())
-                .filter(existing -> !existing.getId().equals(id))
-                .ifPresent(existing -> {
-                    throw new IllegalArgumentException("Nome científico já cadastrado por outra espécie");
-                });
-
-        species.setName(request.name());
-        species.setScientificName(request.scientificName());
-        species.setDescription(request.description());
-        species.setTips(request.tips());
-        species.setImageUrl(request.imageUrl());
-
-        return toResponse(speciesRepository.save(species));
+    public SpeciesResponse update(String id, SpeciesRequest request) {
+        SpeciesRecord saved = speciesRepository.update(
+                id, request.name(), request.scientificName(), request.description(), request.tips(), request.imageUrl());
+        return toResponse(saved);
     }
 
-    public void delete(Long id) {
-        if (!speciesRepository.existsById(id)) {
-            throw new IllegalArgumentException("Espécie não encontrada");
-        }
-        speciesRepository.deleteById(id);
+    public void delete(String id) {
+        speciesRepository.delete(id);
     }
 
-    private Species getOrThrow(Long id) {
-        return speciesRepository.findById(id)
-                .orElseThrow(() -> new IllegalArgumentException("Espécie não encontrada"));
-    }
-
-    private SpeciesResponse toResponse(Species species) {
+    private SpeciesResponse toResponse(SpeciesRecord species) {
         return new SpeciesResponse(
-                species.getId(),
-                species.getName(),
-                species.getScientificName(),
-                species.getDescription(),
-                species.getTips(),
-                species.getImageUrl(),
-                species.getCreatedAt(),
-                species.getUpdatedAt()
+                species.id(),
+                species.name(),
+                species.scientificName(),
+                species.description(),
+                species.tips(),
+                species.imageUrl(),
+                species.createdAt(),
+                species.updatedAt()
         );
     }
 }

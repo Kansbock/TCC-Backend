@@ -1,12 +1,12 @@
 package tcc.aves.dto;
 
-import java.time.LocalDateTime;
+import java.time.Instant;
 
 public record UserResponse(
-        Long id,
+        String id,
         String name,
         String email,
-        LocalDateTime createdAt,
-        LocalDateTime updatedAt
+        Instant createdAt,
+        Instant updatedAt
 ) {
 }

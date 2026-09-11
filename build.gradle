@@ -13,27 +13,49 @@ java {
 	}
 }
 
+ext {
+	awsSdkVersion = '2.54.16'
+	testcontainersVersion = '1.21.4'
+}
+
 repositories {
 	mavenCentral()
 }
 
+dependencyManagement {
+	imports {
+		mavenBom "software.amazon.awssdk:bom:${awsSdkVersion}"
+	}
+}
+
 dependencies {
-	implementation 'org.springframework.boot:spring-boot-h2console'
-	implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
 	implementation 'org.springframework.boot:spring-boot-starter-security'
 	implementation 'org.springframework.boot:spring-boot-starter-validation'
 	implementation 'org.springframework.boot:spring-boot-starter-webmvc'
 	implementation 'io.jsonwebtoken:jjwt-api:0.12.6'
 	runtimeOnly 'io.jsonwebtoken:jjwt-impl:0.12.6'
 	runtimeOnly 'io.jsonwebtoken:jjwt-jackson:0.12.6'
+
+	// DynamoDB Enhanced Client (AWS SDK for Java 2.x). Apache HTTP client is the
+	// AWS-recommended sync client for production workloads (connection pooling).
+	implementation 'software.amazon.awssdk:dynamodb-enhanced'
+	implementation 'software.amazon.awssdk:apache-client'
+
 	compileOnly 'org.projectlombok:lombok'
 	developmentOnly 'org.springframework.boot:spring-boot-devtools'
-	runtimeOnly 'com.h2database:h2'
 	annotationProcessor 'org.projectlombok:lombok'
-	testImplementation 'org.springframework.boot:spring-boot-starter-data-jpa-test'
+
 	testImplementation 'org.springframework.boot:spring-boot-starter-security-test'
 	testImplementation 'org.springframework.boot:spring-boot-starter-validation-test'
 	testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'
+	testImplementation 'org.mockito:mockito-core'
+	testImplementation 'org.mockito:mockito-junit-jupiter'
+
+	// DynamoDB Local via Testcontainers — repository/integration tests run against
+	// a real (local) DynamoDB engine, never against production AWS.
+	testImplementation "org.testcontainers:testcontainers:${testcontainersVersion}"
+	testImplementation "org.testcontainers:junit-jupiter:${testcontainersVersion}"
+
 	testCompileOnly 'org.projectlombok:lombok'
 	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 	testAnnotationProcessor 'org.projectlombok:lombok'

@@ -1,130 +1,167 @@
 package tcc.aves.service;
 
 import org.springframework.stereotype.Service;
-import tcc.aves.dto.*;
-import tcc.aves.model.Sighting;
-import tcc.aves.model.SightingSpecies;
-import tcc.aves.model.Species;
+import tcc.aves.config.SightingProperties;
+import tcc.aves.dto.CursorPage;
+import tcc.aves.dto.SightingRequest;
+import tcc.aves.dto.SightingResponse;
+import tcc.aves.dto.SpeciesResponse;
+import tcc.aves.exception.ResourceNotFoundException;
+import tcc.aves.repository.SightingPage;
+import tcc.aves.repository.SightingQuery;
+import tcc.aves.repository.SightingRecord;
 import tcc.aves.repository.SightingRepository;
+import tcc.aves.repository.SpeciesRecord;
 import tcc.aves.repository.SpeciesRepository;
 
 import java.time.LocalDate;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 @Service
 public class SightingService {
 
     private final SightingRepository sightingRepository;
     private final SpeciesRepository speciesRepository;
+    private final SightingProperties properties;
 
     public SightingService(SightingRepository sightingRepository,
-                           SpeciesRepository speciesRepository) {
+                           SpeciesRepository speciesRepository,
+                           SightingProperties properties) {
         this.sightingRepository = sightingRepository;
         this.speciesRepository = speciesRepository;
+        this.properties = properties;
     }
 
     public SightingResponse create(SightingRequest request) {
-        Sighting sighting = new Sighting();
-        sighting.setDate(request.date());
-        sighting.setTime(request.time());
-        sighting.setImageUrl(request.imageUrl());
-
-        List<SightingSpecies> entries = buildEntries(request.species(), sighting);
-        sighting.getSpecies().addAll(entries);
-
-        return toResponse(sightingRepository.save(sighting));
+        validateSpeciesIds(request.speciesIds());
+        SightingRecord saved = sightingRepository.create(
+                request.speciesIds(), request.date(), request.time(), request.imageUrl());
+        return toResponse(saved);
     }
 
-    public List<SightingResponse> findAll() {
-        return sightingRepository.findAll().stream()
-                .map(this::toResponse)
-                .toList();
-    }
-
-    public SightingResponse findById(Long id) {
-        return toResponse(getOrThrow(id));
-    }
-
-    public List<SightingResponse> findBySpecies(Long speciesId) {
-        return sightingRepository.findBySpeciesId(speciesId).stream()
-                .map(this::toResponse)
-                .toList();
-    }
-
-    public List<SightingResponse> findByDateRange(LocalDate from, LocalDate to) {
-        return sightingRepository.findByDateBetween(from, to).stream()
-                .map(this::toResponse)
-                .toList();
-    }
-
-    public SightingResponse update(Long id, SightingRequest request) {
-        Sighting sighting = getOrThrow(id);
-        sighting.setDate(request.date());
-        sighting.setTime(request.time());
-        sighting.setImageUrl(request.imageUrl());
-
-        sighting.getSpecies().clear();
-        sighting.getSpecies().addAll(buildEntries(request.species(), sighting));
-
-        return toResponse(sightingRepository.save(sighting));
-    }
-
-    public void delete(Long id) {
-        if (!sightingRepository.existsById(id)) {
-            throw new IllegalArgumentException("Avistamento não encontrado");
-        }
-        sightingRepository.deleteById(id);
-    }
-
-    private List<SightingSpecies> buildEntries(List<SightingSpeciesRequest> requests,
-                                               Sighting sighting) {
-        return requests.stream().map(req -> {
-            Species species = speciesRepository.findById(req.speciesId())
-                    .orElseThrow(() -> new IllegalArgumentException(
-                            "Espécie não encontrada: id " + req.speciesId()));
-
-            SightingSpecies entry = new SightingSpecies();
-            entry.setSighting(sighting);
-            entry.setSpecies(species);
-            entry.setQuantity(req.quantity());
-            entry.setGender(req.gender());
-            return entry;
-        }).toList();
-    }
-
-    private Sighting getOrThrow(Long id) {
+    public SightingResponse findById(String id) {
         return sightingRepository.findById(id)
-                .orElseThrow(() -> new IllegalArgumentException("Avistamento não encontrado"));
+                .map(this::toResponse)
+                .orElseThrow(() -> new ResourceNotFoundException("Avistamento não encontrado"));
     }
 
-    private SightingSpeciesResponse toSpeciesEntry(SightingSpecies entry) {
-        Species s = entry.getSpecies();
-        return new SightingSpeciesResponse(
-                entry.getId(),
-                new SpeciesResponse(
-                        s.getId(),
-                        s.getName(),
-                        s.getScientificName(),
-                        s.getDescription(),
-                        s.getTips(),
-                        s.getImageUrl(),
-                        s.getCreatedAt(),
-                        s.getUpdatedAt()
-                ),
-                entry.getQuantity(),
-                entry.getGender()
+    public SightingResponse update(String id, SightingRequest request) {
+        validateSpeciesIds(request.speciesIds());
+        SightingRecord saved = sightingRepository.update(
+                id, request.speciesIds(), request.date(), request.time(), request.imageUrl());
+        return toResponse(saved);
+    }
+
+    public void delete(String id) {
+        sightingRepository.delete(id);
+    }
+
+    /**
+     * Lista avistamentos do mais recente para o mais antigo. {@code speciesId},
+     * {@code from}/{@code to} e {@code cursor} são opcionais e combináveis;
+     * {@code from}/{@code to} devem ser enviados juntos e com {@code from <= to}.
+     */
+    public CursorPage<SightingResponse> query(String speciesId, LocalDate from, LocalDate to,
+                                              String cursor, Integer limit) {
+        validateDateRange(from, to);
+        int effectiveLimit = resolveLimit(limit);
+
+        SightingPage page = sightingRepository.query(new SightingQuery(speciesId, from, to, cursor, effectiveLimit));
+
+        return new CursorPage<>(hydrate(page.items()), page.nextCursor(), page.hasMore());
+    }
+
+    private void validateSpeciesIds(List<String> speciesIds) {
+        Set<String> distinct = new LinkedHashSet<>(speciesIds);
+        if (distinct.size() != speciesIds.size()) {
+            throw new IllegalArgumentException("A lista de espécies não pode conter ids duplicados");
+        }
+        if (speciesIds.size() > properties.maxSpeciesPerSighting()) {
+            throw new IllegalArgumentException(
+                    "Um avistamento pode referenciar no máximo " + properties.maxSpeciesPerSighting() + " espécies");
+        }
+    }
+
+    private void validateDateRange(LocalDate from, LocalDate to) {
+        if ((from == null) != (to == null)) {
+            throw new IllegalArgumentException("Os filtros 'from' e 'to' devem ser informados juntos");
+        }
+        if (from != null && from.isAfter(to)) {
+            throw new IllegalArgumentException("O filtro 'from' deve ser anterior ou igual a 'to'");
+        }
+    }
+
+    private int resolveLimit(Integer limit) {
+        if (limit == null) {
+            return properties.defaultPageSize();
+        }
+        if (limit < 1 || limit > properties.maxPageSize()) {
+            throw new IllegalArgumentException(
+                    "O parâmetro 'limit' deve estar entre 1 e " + properties.maxPageSize());
+        }
+        return limit;
+    }
+
+    private List<SightingResponse> hydrate(List<SightingRecord> records) {
+        if (records.isEmpty()) {
+            return List.of();
+        }
+        Set<String> speciesIds = new LinkedHashSet<>();
+        records.forEach(record -> speciesIds.addAll(record.speciesIds()));
+
+        Map<String, SpeciesRecord> speciesById = speciesRepository.findAllByIds(speciesIds);
+        return records.stream().map(record -> toResponse(record, speciesById)).toList();
+    }
+
+    private SightingResponse toResponse(SightingRecord record) {
+        Map<String, SpeciesRecord> speciesById = speciesRepository.findAllByIds(record.speciesIds());
+        return toResponse(record, speciesById);
+    }
+
+    private SightingResponse toResponse(SightingRecord record, Map<String, SpeciesRecord> speciesById) {
+        List<SpeciesResponse> species = record.speciesIds().stream()
+                .map(speciesId -> resolveSpecies(speciesId, speciesById))
+                .toList();
+
+        return new SightingResponse(
+                record.id(),
+                species,
+                record.date(),
+                record.time(),
+                record.imageUrl(),
+                record.createdAt(),
+                record.updatedAt()
         );
     }
 
-    private SightingResponse toResponse(Sighting sighting) {
-        return new SightingResponse(
-                sighting.getId(),
-                sighting.getSpecies().stream().map(this::toSpeciesEntry).toList(),
-                sighting.getDate(),
-                sighting.getTime(),
-                sighting.getImageUrl(),
-                sighting.getCreatedAt(),
-                sighting.getUpdatedAt()
+    /**
+     * Toda espécie referenciada por um avistamento deve existir — a
+     * integridade é garantida transacionalmente na escrita. Se ainda assim
+     * uma referência não resolver, isso é reportado como inconsistência
+     * interna (500 + log), nunca omitido silenciosamente da resposta.
+     */
+    private SpeciesResponse resolveSpecies(String speciesId, Map<String, SpeciesRecord> speciesById) {
+        SpeciesRecord species = speciesById.get(speciesId);
+        if (species == null) {
+            throw new IllegalStateException(
+                    "Inconsistência de dados: espécie referenciada não encontrada (id " + speciesId + ")");
+        }
+        return toSpeciesResponse(species);
+    }
+
+    private SpeciesResponse toSpeciesResponse(SpeciesRecord species) {
+        return new SpeciesResponse(
+                species.id(),
+                species.name(),
+                species.scientificName(),
+                species.description(),
+                species.tips(),
+                species.imageUrl(),
+                species.createdAt(),
+                species.updatedAt()
         );
     }
 }
