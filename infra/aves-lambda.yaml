@@ -1,0 +1,129 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Lambda and HTTP API infrastructure for the TCC Aves API.
+
+Parameters:
+  ImageUri:
+    Type: String
+    Description: Immutable ECR image URI, including the sha256 digest.
+  ExecutionRoleArn:
+    Type: String
+    AllowedPattern: '^arn:aws:iam::[0-9]{12}:role/.+$'
+    ConstraintDescription: Must be the ARN of the preconfigured Lambda execution role.
+  JwtSecret:
+    Type: String
+    NoEcho: true
+    MinLength: 32
+    ConstraintDescription: Must contain at least 32 characters.
+  FunctionName:
+    Type: String
+    Default: aves-api
+    AllowedPattern: '^[a-zA-Z0-9-_]+$'
+
+Resources:
+  FunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${FunctionName}'
+      RetentionInDays: 14
+      Tags:
+        - Key: environment
+          Value: GRADUACAO
+        - Key: project
+          Value: TCC
+        - Key: group
+          Value: CIC12
+        - Key: creator
+          Value: MATHEUSKANSBOCK_23011823
+        - Key: owner
+          Value: BOSSINI
+
+  AvesFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: FunctionLogGroup
+    Properties:
+      Architectures:
+        - x86_64
+      Code:
+        ImageUri: !Ref ImageUri
+      Description: TCC Aves Spring Boot API.
+      Environment:
+        Variables:
+          JWT_SECRET: !Ref JwtSecret
+      FunctionName: !Ref FunctionName
+      MemorySize: 2048
+      PackageType: Image
+      Role: !Ref ExecutionRoleArn
+      Timeout: 60
+      Tags:
+        - Key: environment
+          Value: GRADUACAO
+        - Key: project
+          Value: TCC
+        - Key: group
+          Value: CIC12
+        - Key: creator
+          Value: MATHEUSKANSBOCK_23011823
+        - Key: owner
+          Value: BOSSINI
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub '${FunctionName}-http-api'
+      ProtocolType: HTTP
+      Tags:
+        environment: GRADUACAO
+        project: TCC
+        group: CIC12
+        creator: MATHEUSKANSBOCK_23011823
+        owner: BOSSINI
+
+  LambdaIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationMethod: POST
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt AvesFunction.Arn
+      PayloadFormatVersion: '2.0'
+      TimeoutInMillis: 30000
+
+  ProxyRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      AuthorizationType: NONE
+      RouteKey: 'ANY /{proxy+}'
+      Target: !Join
+        - /
+        - - integrations
+          - !Ref LambdaIntegration
+
+  DefaultStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      AutoDeploy: true
+      StageName: $default
+
+  ApiGatewayInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref AvesFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*'
+
+Outputs:
+  HttpApiEndpoint:
+    Description: Public HTTPS endpoint consumed by the mobile application.
+    Value: !GetAtt HttpApi.ApiEndpoint
+  HttpApiId:
+    Description: Identifier of the HTTP API.
+    Value: !Ref HttpApi
+  FunctionArn:
+    Description: ARN of the Aves Lambda function.
+    Value: !GetAtt AvesFunction.Arn
+  FunctionName:
+    Description: Name of the Aves Lambda function.
+    Value: !Ref AvesFunction

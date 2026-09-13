@@ -123,6 +123,15 @@ class ControllerApiTest {
     }
 
     @Test
+    void healthEndpointWorksWithoutTokenAndDoesNotUseServices() throws Exception {
+        mockMvc.perform(get("/health"))
+                .andExpect(status().isOk())
+                .andExpect(content().string(""));
+
+        verifyNoInteractions(userService, speciesService, sightingService, userRepository);
+    }
+
+    @Test
     void missingResourceReturnsNotFoundApiError() throws Exception {
         when(userService.findById(SELF_ID)).thenThrow(new ResourceNotFoundException("Usuário não encontrado"));
 

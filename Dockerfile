@@ -30,6 +30,10 @@ FROM eclipse-temurin:25-jre-jammy AS runtime
 RUN groupadd --system spring && useradd --system --gid spring spring
 
 WORKDIR /app
+
+# O adapter implementa a Lambda Runtime API para que o Spring Boot continue
+# recebendo HTTP normalmente, sem handler Java específico para Lambda.
+COPY --from=public.ecr.aws/awsguru/aws-lambda-adapter:1.0.1 /lambda-adapter /opt/extensions/lambda-adapter
 COPY --from=build --chown=spring:spring /workspace/app.jar app.jar
 
 USER spring
@@ -39,6 +43,8 @@ EXPOSE 8080
 # MaxRAMPercentage ajusta a heap ao limite de memória do contêiner: sem isso a
 # JVM dimensiona a heap pela RAM total do host e pode ser morta pelo OOM killer
 # ao ultrapassar o limite da tarefa.
-ENV JAVA_OPTS="-XX:MaxRAMPercentage=75.0"
+ENV JAVA_OPTS="-XX:MaxRAMPercentage=75.0" \
+    AWS_LWA_PORT=8080 \
+    AWS_LWA_READINESS_CHECK_PATH=/health
 
 ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/app.jar"]
