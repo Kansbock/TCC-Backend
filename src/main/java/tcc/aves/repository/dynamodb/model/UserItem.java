@@ -29,6 +29,7 @@ public class UserItem {
     private Instant createdAt;
     private Instant updatedAt;
     private Long version;
+    private Instant notificationActivityAt;
 
     public static String keyFor(String id) {
         return KEY_PREFIX + id;
@@ -115,4 +116,7 @@ public class UserItem {
     public void setVersion(Long version) {
         this.version = version;
     }
+
+    public Instant getNotificationActivityAt() { return notificationActivityAt; }
+    public void setNotificationActivityAt(Instant value) { notificationActivityAt = value; }
 }

@@ -1,91 +1,117 @@
 # Deploy da API Aves no AWS Lambda
 
-## Recursos
+A API mantém sua imagem Spring Boot/Java 25 com Lambda Web Adapter, ECR
+`aves-api`, stack `aves-api-stack`, Lambda `aves-api` e HTTP API existente.
+Não criar IAM, tabela, índice, Streams, bucket ou função de notificações.
+As tabelas `aves-users`, `aves-species` e `aves-sightings` continuam existentes;
+notificações usam partições reservadas na última.
 
-O deploy cria uma Lambda por imagem, HTTP API com rota `ANY /{proxy+}`, grupo
-CloudWatch Logs e o stack CloudFormation. O repositório ECR `aves-api` é
-reutilizado. As tabelas DynamoDB `aves-users`, `aves-species` e
-`aves-sightings` já existem e não são alteradas.
+A imagem habilita `AWS_LWA_ASYNC_INIT=true`: se o Spring ultrapassar a janela
+inicial de 10 segundos, o Web Adapter continua verificando `/health` durante
+a primeira invocação, sem provocar o reinício da aplicação por timeout de
+inicialização. Isso não torna o cold start instantâneo nem aumenta os
+30 segundos disponíveis no API Gateway.
 
-Todos os recursos criados e o ECR recebem estas tags:
+## Pré-requisitos e tags
 
-```text
-environment=GRADUACAO
-project=TCC
-group=CIC12
-creator=MATHEUSKANSBOCK_23011823
-owner=BOSSINI
-```
+AWS CLI v2 com perfil válido na conta `640168426886`, região `us-east-1`;
+Node.js e Docker para construir/publicar imagem; role preconfigurada
+`aluno_23.01182-3_lambda_aves_api`, trust Lambda e policies existentes
+`AWSLambdaBasicExecutionRole` e `AvesDynamoDbAccess`. A identidade de deploy
+precisa das ações ECR/CloudFormation/Lambda/API Gateway/Logs e PassRole sobre
+a role específica. Uma negativa interrompe; não criar concessões alternativas.
 
-O template declara as tags na Lambda, HTTP API e Log Group. Após criar o
-stack, o script aplica as mesmas tags ao estágio `$default` pela API do API
-Gateway, porque a propriedade de tags do estágio não é aceita pela validação
-CloudFormation desta conta.
+Cinco tags permanecem nos recursos etiquetáveis:
+`environment=GRADUACAO`, `project=TCC`, `group=CIC12`,
+`creator=MATHEUSKANSBOCK_23011823`, `owner=BOSSINI`.
+O script verifica role/ECR e reaplica tags no estágio `$default`, que não
+aceita essa propriedade pelo template desta conta. Não altera policies IAM.
 
-## Pré-requisitos
+## Preparação somente leitura
 
-- AWS CLI v2 autenticado na conta `640168426886`, região `us-east-1`;
-- Docker em execução;
-- role IAM `aluno_23.01182-3_lambda_aves_api`, com trust policy para
-  `lambda.amazonaws.com` e as policies:
-  - `arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole`;
-  - `arn:aws:iam::640168426886:policy/AvesDynamoDbAccess`.
-- permissão para usar `iam:PassRole` somente sobre a role acima, além das
-  permissões de ECR, CloudFormation, Lambda, API Gateway e CloudWatch Logs
-  exigidas pelo deploy.
-- `JWT_SECRET` aleatório de ao menos 32 bytes, guardado fora do repositório.
-
-## Implantar
-
-No primeiro deploy, defina o ARN da role e informe o segredo sem exibi-lo no
-terminal. O valor digitado por `read` não entra no histórico de comandos:
+Para o primeiro update que adiciona FCM, indicar o arquivo **externo** da
+conta de serviço e UUID persistido da conta executora do worker, não e-mail:
 
 ```bash
-export EXECUTION_ROLE_ARN='arn:aws:iam::640168426886:role/aluno_23.01182-3_lambda_aves_api'
-read -r -s -p 'JWT_SECRET: ' JWT_SECRET
-printf '\n'
-export JWT_SECRET
+export AWS_PROFILE='640168426886_FullAccess-AlunosGraduacao'
+export AWS_REGION='us-east-1'
+export FCM_SERVICE_ACCOUNT_FILE='/caminho/externo/da-chave-fcm.json'
+export NOTIFICATION_RUNNER_USER_ID='<uuid-da-conta-de-servico>'
 ./scripts/deploy-lambda.sh
-unset JWT_SECRET
 ```
 
-O script constrói uma imagem `linux/amd64`, a envia para o ECR e atualiza o
-stack `aves-api-stack` com uma referência imutável pelo digest da imagem. Ao
-final, ele exibe a URL HTTPS da HTTP API a ser configurada no aplicativo mobile.
-Use sempre a mesma chave ao atualizar ou reverter a imagem, pois sua troca
-invalida os JWTs emitidos anteriormente.
+O wrapper executa `deploy-api.mjs`. **Sem `--apply`, não publica nem altera
+recursos**, diferentemente do script antigo. Confere identidade, role/tags,
+tipo Image, ambiente completo <=4096 bytes, credencial/projeto, template e,
+quando fornecido, digest existente. Exibe somente metadados e digest de
+rollback. Ignora credenciais exportadas antigas e usa o perfil indicado.
+Exportar em outro terminal não muda o ambiente de um processo aberto.
 
-Em atualizações normais, informe apenas `EXECUTION_ROLE_ARN` e execute o
-script. Quando `JWT_SECRET` não é definida, o CloudFormation preserva o valor
-`NoEcho` já existente no stack. Para rotacionar a chave, execute novamente o
-bloco com `read` e `export JWT_SECRET`.
+Publicação exige autorização explícita própria. Após recebê-la:
 
-Para publicar uma tag diferente da derivada do commit Git, defina
-`IMAGE_TAG` antes de executar o script. A Lambda sempre recebe o digest
-resolvido, e não a tag mutável.
+```bash
+./scripts/deploy-lambda.sh --apply
+```
 
-## Configuração do segredo JWT
+Gera tag exclusiva `api-<timestamp>`, build `linux/amd64` com
+`--provenance=false`, login ECR por stdin/config temporária e referência
+imutável SHA-256. Cria change set com requisição protegida e não executa
+update que adicione/remova/substitua recursos inesperadamente.
+Um change set vazio/falho não é declarado sucesso: inspecionar antes de seguir.
+Imagem publicada pode permanecer sem uso após falha; limpeza específica,
+nunca apagar digest ativo ou rollback.
 
-O template recebe `JwtSecret` como parâmetro `NoEcho` e o aplica à variável
-`JWT_SECRET` da Lambda em cada deploy. Isso evita que uma atualização do
-CloudFormation apague a configuração. `NoEcho` mascara o valor em outputs e
-eventos do stack, mas não substitui um serviço de segredos: restrinja acesso à
-configuração CloudFormation/Lambda e mantenha a chave fora do Git e de
-terminais compartilhados.
+Processamento fica **false em cada deploy**, salvo `--enable-processing`
+explicitamente autorizado. Habilitar também o flag do worker depois de
+validar FCM e APK; veja [notifications.md](notifications.md).
+O script não executa worker nem envia push diretamente.
+
+## Segredos e preservação
+
+`JwtSecret` e `FcmServiceAccountJson` são `NoEcho`, sem default, Outputs ou
+Metadata. Chave FCM fica somente no ambiente da Lambda HTTP.
+`NoEcho` não protege Outputs/Metadata nem restringe consultas da configuração;
+controle IAM de leitura e mantenha os arquivos fora do Git/imagem/app/worker.
+Não truncar/dividir/comprimir segredo para contornar os 4 KB.
+
+Primeiro update preserva JWT existente e inicializa apenas FCM. Updates
+seguintes preservam ambos por `UsePreviousValue`; ID executor anterior é
+reutilizado se não informado. Variáveis desconhecidas existentes bloqueiam
+update até serem incorporadas ao template, evitando apagamento silencioso.
+Requests são arquivos 0600 em diretórios 0700, removidos ao finalizar; nenhum
+segredo vai em argv ou log.
+
+Rotação FCM: fornecer `FCM_SERVICE_ACCOUNT_FILE` novo e `--rotate-key`.
+Rotação JWT: fornecer `JWT_SECRET_FILE` externo (ou `JWT_SECRET` por entrada
+oculta) e `--rotate-jwt`. JWT precisa de ao menos 32 caracteres; trocar
+invalida sessões existentes. Entrada JWT em update sem o flag é recusada.
+Após validar a nova FCM, revogar a anterior; configuração publicada antiga
+pode restaurar chave antiga se revertida.
+
+Somente ao preparar uma implantação inicial **autorizada** da própria API,
+usar `--create`, JWT externo, arquivo FCM e UUID executor. Na conta atual o
+stack já existe: **não usar `--create`**. Nenhuma função separada é criada.
 
 ## Validar e reverter
 
-Depois de um deploy com `JWT_SECRET`, valide `GET /health` pela URL impressa
-pelo script. Em seguida, valide o fluxo de cadastro, login e uma rota
-protegida com dados de teste exclusivos, removendo o usuário criado ao final.
+Depois de um deploy autorizado, conferir `GET /health`, URL existente, tags,
+login e rotas com dados sintéticos aprovados. Testar duas contas em APK
+Android próprio; não declarar entrega pelo HTTP 200 do FCM.
 
-Para reverter, execute novamente o deploy definindo `IMAGE_TAG` para uma tag
-anterior que ainda exista no ECR. O script resolve e aplica o digest daquela
-imagem, preservando a infraestrutura e reaplicando o `JWT_SECRET` fornecido
-na sessão.
+Para rollback sem rebuild/publicação, usar o digest da **API** registrado:
 
-## Frontend mobile
+```bash
+export API_IMAGE_URI='640168426886.dkr.ecr.us-east-1.amazonaws.com/aves-api@sha256:<digest-anterior>'
+./scripts/deploy-lambda.sh --apply
+```
 
-Não há configuração CORS porque o consumidor é um aplicativo mobile nativo.
-Se um cliente web for adicionado, defina origens explícitas na HTTP API em uma
-alteração separada; não use `*` para uma API autenticada.
+Sem flags de rotação, JWT/FCM ficam preservados e processamento desabilitado.
+Desligar também o opt-in do worker. Não apagar fila, caixas, contadores ou
+tabelas. Versão anterior à outbox não cria trabalhos para novos avistamentos;
+trabalhos anteriores permanecem para retomada da versão compatível.
+
+## Acesso mobile e CORS
+
+Não há configuração CORS porque o consumidor é aplicativo nativo.
+Cliente web requer origens explícitas em alteração separada, nunca `*`
+para esta API autenticada.

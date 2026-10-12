@@ -30,6 +30,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
     private static final String HEADER = "Authorization";
     private static final String PREFIX = "Bearer ";
+    public static final String NOTIFICATION_REQUEST_START = "notificationRequestStartedNanos";
 
     private final JwtUtil jwtUtil;
     private final UserRepository userRepository;
@@ -44,6 +45,9 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                                     HttpServletResponse response,
                                     FilterChain filterChain) throws ServletException, IOException {
 
+        if ("/api/internal/notification-jobs/process".equals(request.getRequestURI())) {
+            request.setAttribute(NOTIFICATION_REQUEST_START, System.nanoTime());
+        }
         String authHeader = request.getHeader(HEADER);
 
         if (authHeader != null

@@ -44,3 +44,8 @@ out/
 *.key
 *.p12
 *.jks
+
+### Sistema operacional ###
+.DS_Store
+Thumbs.db
+desktop.ini

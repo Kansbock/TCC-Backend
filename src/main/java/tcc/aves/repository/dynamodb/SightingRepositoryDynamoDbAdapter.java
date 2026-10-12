@@ -6,6 +6,7 @@ import software.amazon.awssdk.enhanced.dynamodb.DynamoDbIndex;
 import software.amazon.awssdk.enhanced.dynamodb.DynamoDbTable;
 import software.amazon.awssdk.enhanced.dynamodb.Expression;
 import software.amazon.awssdk.enhanced.dynamodb.Key;
+import software.amazon.awssdk.enhanced.dynamodb.TableSchema;
 import software.amazon.awssdk.enhanced.dynamodb.model.BatchGetItemEnhancedRequest;
 import software.amazon.awssdk.enhanced.dynamodb.model.GetItemEnhancedRequest;
 import software.amazon.awssdk.enhanced.dynamodb.model.Page;
@@ -18,11 +19,14 @@ import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.TransactionCanceledException;
 import tcc.aves.config.SightingProperties;
 import tcc.aves.exception.ConcurrentUpdateException;
+import tcc.aves.exception.DuplicateResourceException;
 import tcc.aves.exception.ResourceNotFoundException;
 import tcc.aves.repository.SightingPage;
 import tcc.aves.repository.SightingQuery;
 import tcc.aves.repository.SightingRecord;
 import tcc.aves.repository.SightingRepository;
+import tcc.aves.repository.dynamodb.model.SightingIdempotencyItem;
+import tcc.aves.repository.dynamodb.model.NotificationJobItem;
 import tcc.aves.repository.dynamodb.model.SightingItem;
 import tcc.aves.repository.dynamodb.model.SpeciesItem;
 import tcc.aves.repository.dynamodb.model.SpeciesSightingRefItem;
@@ -30,6 +34,9 @@ import tcc.aves.repository.dynamodb.support.DynamoDbSupport;
 import tcc.aves.repository.dynamodb.support.SightingCursorCodec;
 import tcc.aves.repository.dynamodb.support.TimeKeys;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
@@ -37,6 +44,7 @@ import java.time.YearMonth;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -72,6 +80,8 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
     private final DynamoDbTable<SpeciesSightingRefItem> refTable;
     private final DynamoDbIndex<SightingItem> timelineIndex;
     private final DynamoDbTable<SpeciesItem> speciesTable;
+    private final DynamoDbTable<SightingIdempotencyItem> idempotencyTable;
+    private final DynamoDbTable<NotificationJobItem> notificationJobs;
     private final SightingProperties properties;
     private final SightingCursorCodec cursorCodec;
 
@@ -81,6 +91,7 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
             DynamoDbTable<SpeciesSightingRefItem> refTable,
             DynamoDbIndex<SightingItem> timelineIndex,
             DynamoDbTable<SpeciesItem> speciesTable,
+            DynamoDbTable<SightingIdempotencyItem> idempotencyTable,
             SightingProperties properties,
             SightingCursorCodec cursorCodec) {
         this.enhancedClient = enhancedClient;
@@ -88,6 +99,8 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
         this.refTable = refTable;
         this.timelineIndex = timelineIndex;
         this.speciesTable = speciesTable;
+        this.idempotencyTable = idempotencyTable;
+        this.notificationJobs = enhancedClient.table(sightingTable.tableName(), TableSchema.fromBean(NotificationJobItem.class));
         this.properties = properties;
         this.cursorCodec = cursorCodec;
     }
@@ -129,7 +142,92 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
             tx.addUpdateItem(speciesTable, current);
         }
 
+        addNotificationJob(tx, id, now, distinctIds.size());
         executeTransaction(tx.build());
+
+        return toRecord(sighting);
+    }
+
+    @Override
+    public SightingRecord createIdempotent(String idempotencyKey, List<String> speciesIds, LocalDate date, LocalTime time, String imageUrl) {
+        String fingerprint = computeFingerprint(speciesIds, date, time, imageUrl);
+
+        SightingIdempotencyItem existing = getIdempotencyItem(idempotencyKey);
+        if (existing != null) {
+            return replayOrConflict(existing, fingerprint);
+        }
+
+        Set<String> distinctIds = new LinkedHashSet<>(speciesIds);
+        Map<String, SpeciesItem> species = fetchSpeciesOrThrow(distinctIds);
+
+        String id = UUID.randomUUID().toString();
+        Instant now = Instant.now();
+        Instant observedAt = toInstant(date, time);
+
+        SightingItem sighting = new SightingItem();
+        sighting.setPk(SightingItem.keyFor(id));
+        sighting.setSk(SightingItem.DETAILS_SORT_KEY);
+        sighting.setId(id);
+        sighting.setDate(date);
+        sighting.setTime(time);
+        sighting.setImageUrl(imageUrl);
+        sighting.setSpeciesIds(List.copyOf(distinctIds));
+        sighting.setObservedAt(observedAt);
+        sighting.setTimelinePk(SightingItem.TIMELINE_PK_PREFIX + YearMonth.from(date));
+        sighting.setTimelineSk(TimeKeys.sortable(observedAt) + "#" + id);
+        sighting.setCreatedAt(now);
+        sighting.setUpdatedAt(now);
+
+        SightingIdempotencyItem idempotencyItem = new SightingIdempotencyItem();
+        idempotencyItem.setPk(SightingIdempotencyItem.keyFor(idempotencyKey));
+        idempotencyItem.setIdempotencyKey(idempotencyKey);
+        idempotencyItem.setRequestFingerprint(fingerprint);
+        idempotencyItem.setSightingId(id);
+        idempotencyItem.setCreatedAt(now);
+
+        // A condição na posição 1 (item de idempotência) é o que distingue
+        // esta transação de duas requisições concorrentes com a mesma
+        // chave: a perdedora recebe TransactionCanceledException e trata
+        // isso como replay, não como erro.
+        TransactWriteItemsEnhancedRequest.Builder tx = TransactWriteItemsEnhancedRequest.builder()
+                .addPutItem(sightingTable, TransactPutItemEnhancedRequest.builder(SightingItem.class)
+                        .item(sighting)
+                        .conditionExpression(notExists())
+                        .build())
+                .addPutItem(idempotencyTable, TransactPutItemEnhancedRequest.builder(SightingIdempotencyItem.class)
+                        .item(idempotencyItem)
+                        .conditionExpression(notExists())
+                        .build());
+
+        for (String speciesId : distinctIds) {
+            tx.addPutItem(refTable, newRefItem(speciesId, observedAt, id));
+            SpeciesItem current = species.get(speciesId);
+            current.setReferenceCount(current.getReferenceCount() + 1);
+            current.setUpdatedAt(now);
+            tx.addUpdateItem(speciesTable, current);
+        }
+
+        addNotificationJob(tx, id, now, distinctIds.size());
+        try {
+            enhancedClient.transactWriteItems(tx.build());
+        } catch (TransactionCanceledException e) {
+            if (DynamoDbSupport.isConditionFailure(e.cancellationReasons(), 1)) {
+                SightingIdempotencyItem winner = getIdempotencyItem(idempotencyKey);
+                if (winner != null) {
+                    return replayOrConflict(winner, fingerprint);
+                }
+
+            }
+            if (DynamoDbSupport.hasConditionFailure(e.cancellationReasons())) {
+                throw new ConcurrentUpdateException("O registro foi alterado por outra operação. Tente novamente.");
+            }
+            RuntimeException translated = DynamoDbSupport.translateGeneric(e);
+            throw translated != null ? translated : new ConcurrentUpdateException(
+                    "O registro foi alterado por outra operação. Tente novamente.");
+        } catch (RuntimeException e) {
+            RuntimeException translated = DynamoDbSupport.translateGeneric(e);
+            throw translated != null ? translated : e;
+        }
 
         return toRecord(sighting);
     }
@@ -141,6 +239,16 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
                 .consistentRead(true)
                 .build());
         return Optional.ofNullable(item).map(this::toRecord);
+    }
+
+    private void addNotificationJob(TransactWriteItemsEnhancedRequest.Builder tx, String id, Instant at, int speciesCount) {
+        if (4 + 2 * speciesCount > 100) {
+            throw new IllegalArgumentException("Limite de espécies excede a capacidade transacional da outbox");
+        }
+        for (boolean pending : List.of(true, false)) {
+            tx.addPutItem(notificationJobs, TransactPutItemEnhancedRequest.builder(NotificationJobItem.class)
+                    .item(NotificationJobItem.create(id, at, pending)).conditionExpression(notExists()).build());
+        }
     }
 
     @Override
@@ -409,6 +517,9 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
         try {
             enhancedClient.transactWriteItems(request);
         } catch (TransactionCanceledException e) {
+            if (DynamoDbSupport.hasConditionFailure(e.cancellationReasons())) {
+                throw new ConcurrentUpdateException("O registro foi alterado por outra operação. Tente novamente.");
+            }
             RuntimeException translated = DynamoDbSupport.translateGeneric(e);
             throw translated != null ? translated : new ConcurrentUpdateException(
                     "O registro foi alterado por outra operação. Tente novamente.");
@@ -430,6 +541,52 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
 
     private static Key sightingKey(String id) {
         return Key.builder().partitionValue(SightingItem.keyFor(id)).sortValue(SightingItem.DETAILS_SORT_KEY).build();
+    }
+
+    private SightingIdempotencyItem getIdempotencyItem(String idempotencyKey) {
+        return idempotencyTable.getItem(GetItemEnhancedRequest.builder()
+                .key(Key.builder()
+                        .partitionValue(SightingIdempotencyItem.keyFor(idempotencyKey))
+                        .sortValue(SightingIdempotencyItem.SORT_KEY)
+                        .build())
+                .consistentRead(true)
+                .build());
+    }
+
+    /**
+     * Repetição da mesma chave com o mesmo payload devolve o avistamento
+     * original; com um payload diferente, é rejeitada como conflito, para
+     * nunca associar silenciosamente uma chave de idempotência a dois
+     * resultados distintos.
+     */
+    private SightingRecord replayOrConflict(SightingIdempotencyItem existing, String fingerprint) {
+        if (!existing.getRequestFingerprint().equals(fingerprint)) {
+            throw new DuplicateResourceException(
+                    "Idempotency-Key já foi usada com uma requisição diferente");
+        }
+        SightingItem sighting = sightingTable.getItem(GetItemEnhancedRequest.builder()
+                .key(sightingKey(existing.getSightingId()))
+                .consistentRead(true)
+                .build());
+        if (sighting == null) {
+            throw new ResourceNotFoundException(
+                    "Avistamento associado à chave de idempotência não foi encontrado");
+        }
+        return toRecord(sighting);
+    }
+
+    /** Impressão digital do payload usada para detectar reuso de chave com dados divergentes. */
+    private static String computeFingerprint(List<String> speciesIds, LocalDate date, LocalTime time, String imageUrl) {
+        List<String> sortedIds = speciesIds.stream().sorted().toList();
+        String canonical = String.join("|", sortedIds) + "||" + date + "|" + time + "|"
+                + (imageUrl == null ? "" : imageUrl);
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(canonical.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(hash);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 não disponível na JVM", e);
+        }
     }
 
     private static Instant toInstant(LocalDate date, LocalTime time) {

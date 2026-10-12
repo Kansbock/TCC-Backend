@@ -18,6 +18,18 @@ Parameters:
     Type: String
     Default: aves-api
     AllowedPattern: '^[a-zA-Z0-9-_]+$'
+  FcmServiceAccountJson:
+    Type: String
+    NoEcho: true
+    MinLength: 100
+    Description: External Firebase service-account JSON; never include in outputs or metadata.
+  NotificationRunnerUserId:
+    Type: String
+    AllowedPattern: '^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$'
+  NotificationProcessingEnabled:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
 
 Resources:
   FunctionLogGroup:
@@ -49,6 +61,10 @@ Resources:
       Environment:
         Variables:
           JWT_SECRET: !Ref JwtSecret
+          FCM_SERVICE_ACCOUNT_JSON: !Ref FcmServiceAccountJson
+          FCM_PROJECT_ID: avistai-tcc
+          NOTIFICATION_RUNNER_USER_ID: !Ref NotificationRunnerUserId
+          NOTIFICATION_PROCESSING_ENABLED: !Ref NotificationProcessingEnabled
       FunctionName: !Ref FunctionName
       MemorySize: 2048
       PackageType: Image

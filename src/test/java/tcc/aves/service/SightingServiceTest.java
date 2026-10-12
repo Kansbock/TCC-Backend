@@ -165,6 +165,36 @@ class SightingServiceTest {
     }
 
     @Test
+    void createWithIdempotencyKeyDelegatesToRepositoryIdempotentPath() {
+        SightingRequest request = request(List.of("sp-1"));
+        SightingRecord saved = sightingRecord("sig-1", List.of("sp-1"), request.date(), request.time());
+        when(sightingRepository.createIdempotent("worker-key", request.speciesIds(), request.date(), request.time(), request.imageUrl()))
+                .thenReturn(saved);
+        when(speciesRepository.findAllByIds(List.of("sp-1"))).thenReturn(speciesMap(
+                speciesRecord("sp-1", "Arara", "Ara ararauna")));
+
+        SightingResponse created = sightingService.create(request, "worker-key");
+
+        assertEquals(List.of("sp-1"), created.species().stream().map(SpeciesResponse::id).toList());
+        verify(sightingRepository, never()).create(any(), any(), any(), any());
+    }
+
+    @Test
+    void createWithoutIdempotencyKeyFallsBackToLegacyBehavior() {
+        SightingRequest request = request(List.of("sp-1"));
+        SightingRecord saved = sightingRecord("sig-1", List.of("sp-1"), request.date(), request.time());
+        when(sightingRepository.create(request.speciesIds(), request.date(), request.time(), request.imageUrl())).thenReturn(saved);
+        when(speciesRepository.findAllByIds(List.of("sp-1"))).thenReturn(speciesMap(
+                speciesRecord("sp-1", "Arara", "Ara ararauna")));
+
+        sightingService.create(request, null);
+        sightingService.create(request, "  ");
+
+        verify(sightingRepository, times(2)).create(request.speciesIds(), request.date(), request.time(), request.imageUrl());
+        verify(sightingRepository, never()).createIdempotent(any(), any(), any(), any(), any());
+    }
+
+    @Test
     void deleteDelegatesToRepository() {
         sightingService.delete("sig-1");
 

@@ -42,6 +42,21 @@ public class SightingService {
         return toResponse(saved);
     }
 
+    /**
+     * Igual a {@link #create(SightingRequest)}, mas associada a uma chave de
+     * idempotência: uma repetição com a mesma chave e o mesmo payload
+     * devolve o avistamento original em vez de criar um duplicado.
+     */
+    public SightingResponse create(SightingRequest request, String idempotencyKey) {
+        if (idempotencyKey == null || idempotencyKey.isBlank()) {
+            return create(request);
+        }
+        validateSpeciesIds(request.speciesIds());
+        SightingRecord saved = sightingRepository.createIdempotent(
+                idempotencyKey, request.speciesIds(), request.date(), request.time(), request.imageUrl());
+        return toResponse(saved);
+    }
+
     public SightingResponse findById(String id) {
         return sightingRepository.findById(id)
                 .map(this::toResponse)

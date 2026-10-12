@@ -2,7 +2,6 @@ package tcc.aves.repository.dynamodb;
 
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import tcc.aves.config.SightingProperties;
@@ -12,6 +11,7 @@ import tcc.aves.repository.SightingPage;
 import tcc.aves.repository.SightingQuery;
 import tcc.aves.repository.SightingRecord;
 import tcc.aves.repository.SpeciesRecord;
+import tcc.aves.repository.dynamodb.model.SightingIdempotencyItem;
 import tcc.aves.repository.dynamodb.model.SightingItem;
 import tcc.aves.repository.dynamodb.model.SpeciesItem;
 import tcc.aves.repository.dynamodb.model.SpeciesSightingRefItem;
@@ -35,7 +35,6 @@ import java.util.concurrent.Future;
 import static org.junit.jupiter.api.Assertions.*;
 
 @Testcontainers(disabledWithoutDocker = true)
-@Disabled("Requires the amazon/dynamodb-local Docker image, which this environment cannot pull/run reliably.")
 class SightingRepositoryDynamoDbAdapterTest extends AbstractDynamoDbLocalTest {
 
     private static final String USERS_TABLE = "it-sightings-users";
@@ -77,7 +76,7 @@ class SightingRepositoryDynamoDbAdapterTest extends AbstractDynamoDbLocalTest {
         assertFalse(getItem(SIGHTINGS_TABLE, SpeciesSightingRefItem.pkFor(tucano.id()), SpeciesSightingRefItem.skFor(observedAt, created.id())).isEmpty());
         assertEquals(1L, speciesRepository.findById(arara.id()).orElseThrow().referenceCount());
         assertEquals(1L, speciesRepository.findById(tucano.id()).orElseThrow().referenceCount());
-        assertEquals(3, countItems(SIGHTINGS_TABLE));
+        assertEquals(5, countItems(SIGHTINGS_TABLE));
     }
 
     @Test
@@ -87,6 +86,47 @@ class SightingRepositoryDynamoDbAdapterTest extends AbstractDynamoDbLocalTest {
 
         assertEquals("Espécie não encontrada: id missing-species", exception.getMessage());
         assertEquals(0, countItems(SIGHTINGS_TABLE));
+    }
+
+    @Test
+    void createIdempotentPersistsIdempotencyItemAlongsideSighting() {
+        SpeciesRecord arara = speciesRepository.create("Arara", "Ara ararauna", "Desc", "Tips", "https://img/a");
+
+        SightingRecord created = sightingRepository.createIdempotent(
+                "worker-key-1", List.of(arara.id()), LocalDate.of(2026, 9, 10), LocalTime.of(10, 15), "https://sighting/1");
+
+        assertFalse(getItem(SIGHTINGS_TABLE, SightingIdempotencyItem.keyFor("worker-key-1"), SightingIdempotencyItem.SORT_KEY).isEmpty());
+        assertEquals(1L, speciesRepository.findById(arara.id()).orElseThrow().referenceCount());
+        assertEquals(5, countItems(SIGHTINGS_TABLE));
+        assertNotNull(created.id());
+    }
+
+    @Test
+    void createIdempotentReplaysSameSightingForSameKeyAndPayload() {
+        SpeciesRecord arara = speciesRepository.create("Arara", "Ara ararauna", "Desc", "Tips", "https://img/a");
+
+        SightingRecord first = sightingRepository.createIdempotent(
+                "worker-key-2", List.of(arara.id()), LocalDate.of(2026, 9, 10), LocalTime.of(10, 15), "https://sighting/1");
+        SightingRecord replay = sightingRepository.createIdempotent(
+                "worker-key-2", List.of(arara.id()), LocalDate.of(2026, 9, 10), LocalTime.of(10, 15), "https://sighting/1");
+
+        assertEquals(first.id(), replay.id());
+        assertEquals(1L, speciesRepository.findById(arara.id()).orElseThrow().referenceCount());
+        assertEquals(5, countItems(SIGHTINGS_TABLE));
+    }
+
+    @Test
+    void createIdempotentRejectsSameKeyWithDifferentPayload() {
+        SpeciesRecord arara = speciesRepository.create("Arara", "Ara ararauna", "Desc", "Tips", "https://img/a");
+        sightingRepository.createIdempotent(
+                "worker-key-3", List.of(arara.id()), LocalDate.of(2026, 9, 10), LocalTime.of(10, 15), "https://sighting/1");
+
+        tcc.aves.exception.DuplicateResourceException exception = assertThrows(
+                tcc.aves.exception.DuplicateResourceException.class,
+                () -> sightingRepository.createIdempotent(
+                        "worker-key-3", List.of(arara.id()), LocalDate.of(2026, 9, 10), LocalTime.of(10, 15), "https://sighting/DIFFERENT"));
+
+        assertEquals("Idempotency-Key já foi usada com uma requisição diferente", exception.getMessage());
     }
 
     @Test
@@ -144,16 +184,22 @@ class SightingRepositoryDynamoDbAdapterTest extends AbstractDynamoDbLocalTest {
         SightingRecord created = sightingRepository.create(List.of(arara.id()), LocalDate.of(2026, 9, 10), LocalTime.of(10, 15), "https://sighting/1");
 
         CountDownLatch bothReadsDone = new CountDownLatch(2);
-        CountDownLatch releaseUpdates = new CountDownLatch(1);
-        SightingRepositoryDynamoDbAdapter repositoryA = newRepository(blockingSightingTable(bothReadsDone, releaseUpdates));
-        SightingRepositoryDynamoDbAdapter repositoryB = newRepository(blockingSightingTable(bothReadsDone, releaseUpdates));
+        CountDownLatch releaseFirst = new CountDownLatch(1);
+        CountDownLatch releaseSecond = new CountDownLatch(1);
+        SightingRepositoryDynamoDbAdapter repositoryA = newRepository(blockingSightingTable(bothReadsDone, releaseFirst));
+        SightingRepositoryDynamoDbAdapter repositoryB = newRepository(blockingSightingTable(bothReadsDone, releaseSecond));
 
         try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
             Future<SightingRecord> first = executor.submit(updateCall(repositoryA, created.id(), arara.id(), "https://sighting/a"));
             Future<SightingRecord> second = executor.submit(updateCall(repositoryB, created.id(), arara.id(), "https://sighting/b"));
 
             bothReadsDone.await();
-            releaseUpdates.countDown();
+            releaseFirst.countDown();
+            try {
+                first.get();
+            } finally {
+                releaseSecond.countDown();
+            }
 
             int successes = 0;
             int conflicts = 0;
@@ -235,6 +281,7 @@ class SightingRepositoryDynamoDbAdapterTest extends AbstractDynamoDbLocalTest {
                 speciesSightingRefTable(SIGHTINGS_TABLE),
                 sightingTimelineIndex(SIGHTINGS_TABLE),
                 speciesTable(SPECIES_TABLE),
+                sightingIdempotencyTable(SIGHTINGS_TABLE),
                 new SightingProperties(20, 50, 20, 60),
                 new SightingCursorCodec(new ObjectMapper()));
     }

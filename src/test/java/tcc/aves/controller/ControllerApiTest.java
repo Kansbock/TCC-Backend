@@ -217,6 +217,77 @@ class ControllerApiTest {
                 .andExpect(jsonPath("$.species[0].id").value("sp-1"));
     }
 
+    @Test
+    void createSightingWithoutIdempotencyKeyUsesLegacyServiceMethod() throws Exception {
+        SightingResponse response = sightingResponse();
+        when(sightingService.create(any())).thenReturn(response);
+
+        mockMvc.perform(post("/api/sightings")
+                        .header("Authorization", bearer(SELF_ID, EMAIL))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(sightingRequestJson()))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.id").value("sig-1"));
+
+        verify(sightingService).create(any());
+        verify(sightingService, never()).create(any(), anyString());
+    }
+
+    @Test
+    void createSightingWithIdempotencyKeyHeaderUsesIdempotentServiceMethod() throws Exception {
+        SightingResponse response = sightingResponse();
+        when(sightingService.create(any(), eq("worker-key-123"))).thenReturn(response);
+
+        mockMvc.perform(post("/api/sightings")
+                        .header("Authorization", bearer(SELF_ID, EMAIL))
+                        .header("Idempotency-Key", "worker-key-123")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(sightingRequestJson()))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.id").value("sig-1"));
+
+        verify(sightingService).create(any(), eq("worker-key-123"));
+        verify(sightingService, never()).create(any());
+    }
+
+    @Test
+    void createSightingReusedIdempotencyKeyWithDifferentPayloadReturnsConflict() throws Exception {
+        when(sightingService.create(any(), eq("worker-key-456")))
+                .thenThrow(new DuplicateResourceException("Idempotency-Key já foi usada com uma requisição diferente"));
+
+        mockMvc.perform(post("/api/sightings")
+                        .header("Authorization", bearer(SELF_ID, EMAIL))
+                        .header("Idempotency-Key", "worker-key-456")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(sightingRequestJson()))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.status").value(409))
+                .andExpect(jsonPath("$.message").value("Idempotency-Key já foi usada com uma requisição diferente"));
+    }
+
+    private static SightingResponse sightingResponse() {
+        Instant now = Instant.parse("2026-09-10T12:30:00Z");
+        return new SightingResponse(
+                "sig-1",
+                List.of(speciesResponse("sp-1", "Arara", "Ara ararauna")),
+                LocalDate.of(2026, 9, 10),
+                LocalTime.of(10, 15),
+                "https://img/sig-1",
+                now,
+                now);
+    }
+
+    private static String sightingRequestJson() {
+        return """
+                {
+                  "speciesIds": ["sp-1"],
+                  "date": "2026-09-10",
+                  "time": "10:15:00",
+                  "imageUrl": "https://img/sig-1"
+                }
+                """;
+    }
+
     private String bearer(String userId, String email) {
         return "Bearer " + jwtUtil.generateToken(userId, email);
     }

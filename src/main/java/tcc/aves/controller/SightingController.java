@@ -23,8 +23,13 @@ public class SightingController {
     }
 
     @PostMapping
-    public ResponseEntity<SightingResponse> create(@Valid @RequestBody SightingRequest request) {
-        return ResponseEntity.status(HttpStatus.CREATED).body(sightingService.create(request));
+    public ResponseEntity<SightingResponse> create(
+            @Valid @RequestBody SightingRequest request,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
+        SightingResponse response = (idempotencyKey == null || idempotencyKey.isBlank())
+                ? sightingService.create(request)
+                : sightingService.create(request, idempotencyKey);
+        return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }
 
     /** Filtros combináveis; {@code from}/{@code to} devem ser enviados juntos. */

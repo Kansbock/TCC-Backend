@@ -25,6 +25,7 @@ import software.amazon.awssdk.services.dynamodb.model.ProjectionType;
 import software.amazon.awssdk.services.dynamodb.model.ResourceNotFoundException;
 import software.amazon.awssdk.services.dynamodb.model.ScalarAttributeType;
 import tcc.aves.repository.dynamodb.model.EmailReservationItem;
+import tcc.aves.repository.dynamodb.model.SightingIdempotencyItem;
 import tcc.aves.repository.dynamodb.model.SightingItem;
 import tcc.aves.repository.dynamodb.model.SpeciesItem;
 import tcc.aves.repository.dynamodb.model.SpeciesSightingRefItem;
@@ -94,6 +95,10 @@ public abstract class AbstractDynamoDbLocalTest {
 
     protected DynamoDbIndex<SightingItem> sightingTimelineIndex(String tableName) {
         return sightingTable(tableName).index(SightingItem.TIMELINE_INDEX_NAME);
+    }
+
+    protected DynamoDbTable<SightingIdempotencyItem> sightingIdempotencyTable(String tableName) {
+        return enhancedClient.table(tableName, TableSchema.fromBean(SightingIdempotencyItem.class));
     }
 
     protected Map<String, software.amazon.awssdk.services.dynamodb.model.AttributeValue> getItem(String tableName, String pk) {

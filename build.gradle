@@ -40,6 +40,7 @@ dependencies {
 	// AWS-recommended sync client for production workloads (connection pooling).
 	implementation 'software.amazon.awssdk:dynamodb-enhanced'
 	implementation 'software.amazon.awssdk:apache-client'
+	implementation 'com.google.auth:google-auth-library-oauth2-http:1.54.0'
 
 	compileOnly 'org.projectlombok:lombok'
 	developmentOnly 'org.springframework.boot:spring-boot-devtools'

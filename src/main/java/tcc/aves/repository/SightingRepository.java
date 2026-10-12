@@ -19,6 +19,15 @@ public interface SightingRepository {
      */
     SightingRecord create(List<String> speciesIds, LocalDate date, LocalTime time, String imageUrl);
 
+    /**
+     * Cria um avistamento associado a uma chave de idempotência fornecida
+     * pelo cliente. Uma repetição com a mesma chave e o mesmo payload
+     * (mesmas espécies, data, hora e URL de imagem) devolve o avistamento
+     * originalmente criado, sem nova escrita. A mesma chave reutilizada com
+     * um payload diferente lança {@code DuplicateResourceException}.
+     */
+    SightingRecord createIdempotent(String idempotencyKey, List<String> speciesIds, LocalDate date, LocalTime time, String imageUrl);
+
     Optional<SightingRecord> findById(String id);
 
     /**

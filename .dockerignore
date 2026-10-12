@@ -12,6 +12,10 @@ build/
 node_modules/
 
 data/
+.env
+.env.*
+.aws/
+*-firebase-adminsdk-*.json
 *.md
 Dockerfile
 .dockerignore

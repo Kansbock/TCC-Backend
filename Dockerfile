@@ -45,6 +45,7 @@ EXPOSE 8080
 # ao ultrapassar o limite da tarefa.
 ENV JAVA_OPTS="-XX:MaxRAMPercentage=75.0" \
     AWS_LWA_PORT=8080 \
-    AWS_LWA_READINESS_CHECK_PATH=/health
+    AWS_LWA_READINESS_CHECK_PATH=/health \
+    AWS_LWA_ASYNC_INIT=true
 
 ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/app.jar"]
