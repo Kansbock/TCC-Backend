@@ -30,11 +30,13 @@ import tcc.aves.repository.SightingRepository;
 import tcc.aves.repository.dynamodb.model.SightingIdempotencyItem;
 import tcc.aves.repository.dynamodb.model.NotificationJobItem;
 import tcc.aves.repository.dynamodb.model.SightingItem;
+import tcc.aves.repository.dynamodb.model.SightingGroupItem;
 import tcc.aves.repository.dynamodb.model.SpeciesItem;
 import tcc.aves.repository.dynamodb.model.SpeciesSightingRefItem;
 import tcc.aves.repository.dynamodb.support.DynamoDbSupport;
 import tcc.aves.repository.dynamodb.support.SightingCursorCodec;
 import tcc.aves.repository.dynamodb.support.TimeKeys;
+import tcc.aves.repository.dynamodb.support.SightingGrouping;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -87,6 +89,7 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
     private final DynamoDbTable<SpeciesItem> speciesTable;
     private final DynamoDbTable<SightingIdempotencyItem> idempotencyTable;
     private final DynamoDbTable<NotificationJobItem> notificationJobs;
+    private final DynamoDbTable<SightingGroupItem> groups;
     private final SightingProperties properties;
     private final SightingCursorCodec cursorCodec;
 
@@ -109,6 +112,7 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
         this.speciesTable = speciesTable;
         this.idempotencyTable = idempotencyTable;
         this.notificationJobs = enhancedClient.table(sightingTable.tableName(), TableSchema.fromBean(NotificationJobItem.class));
+        this.groups = enhancedClient.table(sightingTable.tableName(), TableSchema.fromBean(SightingGroupItem.class));
         this.properties = properties;
         this.cursorCodec = cursorCodec;
     }
@@ -129,141 +133,106 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
 
     @Override
     public SightingRecord create(List<String> speciesIds, LocalDate date, LocalTime time, String imageUrl) {
-        Set<String> distinctIds = new LinkedHashSet<>(speciesIds);
-        Map<String, SpeciesItem> species = fetchSpeciesOrThrow(distinctIds);
-
-        String id = UUID.randomUUID().toString();
-        Instant now = Instant.now();
-        Instant observedAt = toInstant(date, time);
-
-        SightingItem sighting = new SightingItem();
-        sighting.setPk(SightingItem.keyFor(id));
-        sighting.setSk(SightingItem.DETAILS_SORT_KEY);
-        sighting.setId(id);
-        sighting.setDate(date);
-        sighting.setTime(time);
-        sighting.setImageUrl(imageUrl);
-        sighting.setSpeciesIds(List.copyOf(distinctIds));
-        sighting.setObservedAt(observedAt);
-        sighting.setTimelinePk(SightingItem.TIMELINE_PK_PREFIX + YearMonth.from(date));
-        sighting.setTimelineSk(TimeKeys.sortable(observedAt) + "#" + id);
-        sighting.setPrimarySpeciesPk(SightingItem.PRIMARY_SPECIES_PK);
-        sighting.setPrimarySpeciesSk(primarySpeciesSortKey(species.get(speciesIds.get(0)).getCommonName(), observedAt, id));
-        sighting.setCreatedAt(now);
-        sighting.setUpdatedAt(now);
-
-        TransactWriteItemsEnhancedRequest.Builder tx = TransactWriteItemsEnhancedRequest.builder()
-                .addPutItem(sightingTable, TransactPutItemEnhancedRequest.builder(SightingItem.class)
-                        .item(sighting)
-                        .conditionExpression(notExists())
-                        .build());
-
-        for (String speciesId : distinctIds) {
-            tx.addPutItem(refTable, newRefItem(speciesId, observedAt, id));
-            SpeciesItem current = species.get(speciesId);
-            current.setReferenceCount(current.getReferenceCount() + 1);
-            current.setUpdatedAt(now);
-            tx.addUpdateItem(speciesTable, current);
-        }
-
-        addNotificationJob(tx, id, now, distinctIds.size());
-        executeTransaction(tx.build());
-
-        return toRecord(sighting);
+        return acceptPhoto(null, speciesIds, date, time, imageUrl);
     }
 
     @Override
     public SightingRecord createIdempotent(String idempotencyKey, List<String> speciesIds, LocalDate date, LocalTime time, String imageUrl) {
+        return acceptPhoto(idempotencyKey, speciesIds, date, time, imageUrl);
+    }
+
+    private SightingRecord acceptPhoto(String idempotencyKey, List<String> speciesIds,
+                                      LocalDate date, LocalTime time, String imageUrl) {
+        List<String> incoming = imageUrl == null ? List.of() : List.of(imageUrl);
+        validatePhotos(incoming);
         String fingerprint = computeFingerprint(speciesIds, date, time, imageUrl);
-
-        SightingIdempotencyItem existing = getIdempotencyItem(idempotencyKey);
-        if (existing != null) {
-            return replayOrConflict(existing, fingerprint);
-        }
-
-        Set<String> distinctIds = new LinkedHashSet<>(speciesIds);
-        Map<String, SpeciesItem> species = fetchSpeciesOrThrow(distinctIds);
-
-        String id = UUID.randomUUID().toString();
-        Instant now = Instant.now();
-        Instant observedAt = toInstant(date, time);
-
-        SightingItem sighting = new SightingItem();
-        sighting.setPk(SightingItem.keyFor(id));
-        sighting.setSk(SightingItem.DETAILS_SORT_KEY);
-        sighting.setId(id);
-        sighting.setDate(date);
-        sighting.setTime(time);
-        sighting.setImageUrl(imageUrl);
-        sighting.setSpeciesIds(List.copyOf(distinctIds));
-        sighting.setObservedAt(observedAt);
-        sighting.setTimelinePk(SightingItem.TIMELINE_PK_PREFIX + YearMonth.from(date));
-        sighting.setTimelineSk(TimeKeys.sortable(observedAt) + "#" + id);
-        sighting.setPrimarySpeciesPk(SightingItem.PRIMARY_SPECIES_PK);
-        sighting.setPrimarySpeciesSk(primarySpeciesSortKey(species.get(speciesIds.get(0)).getCommonName(), observedAt, id));
-        sighting.setCreatedAt(now);
-        sighting.setUpdatedAt(now);
-
-        SightingIdempotencyItem idempotencyItem = new SightingIdempotencyItem();
-        idempotencyItem.setPk(SightingIdempotencyItem.keyFor(idempotencyKey));
-        idempotencyItem.setIdempotencyKey(idempotencyKey);
-        idempotencyItem.setRequestFingerprint(fingerprint);
-        idempotencyItem.setSightingId(id);
-        idempotencyItem.setCreatedAt(now);
-
-        // A condição na posição 1 (item de idempotência) é o que distingue
-        // esta transação de duas requisições concorrentes com a mesma
-        // chave: a perdedora recebe TransactionCanceledException e trata
-        // isso como replay, não como erro.
-        TransactWriteItemsEnhancedRequest.Builder tx = TransactWriteItemsEnhancedRequest.builder()
-                .addPutItem(sightingTable, TransactPutItemEnhancedRequest.builder(SightingItem.class)
-                        .item(sighting)
-                        .conditionExpression(notExists())
-                        .build())
-                .addPutItem(idempotencyTable, TransactPutItemEnhancedRequest.builder(SightingIdempotencyItem.class)
-                        .item(idempotencyItem)
-                        .conditionExpression(notExists())
-                        .build());
-
-        for (String speciesId : distinctIds) {
-            tx.addPutItem(refTable, newRefItem(speciesId, observedAt, id));
-            SpeciesItem current = species.get(speciesId);
-            current.setReferenceCount(current.getReferenceCount() + 1);
-            current.setUpdatedAt(now);
-            tx.addUpdateItem(speciesTable, current);
-        }
-
-        addNotificationJob(tx, id, now, distinctIds.size());
-        try {
-            enhancedClient.transactWriteItems(tx.build());
-        } catch (TransactionCanceledException e) {
-            if (DynamoDbSupport.isConditionFailure(e.cancellationReasons(), 1)) {
-                SightingIdempotencyItem winner = getIdempotencyItem(idempotencyKey);
-                if (winner != null) {
-                    return replayOrConflict(winner, fingerprint);
+        String groupKey = SightingGrouping.key(speciesIds, date, time);
+        for (int attempt = 0; attempt < 12; attempt++) {
+            if (idempotencyKey != null) {
+                SightingIdempotencyItem existing = getIdempotencyItem(idempotencyKey);
+                if (existing != null) return replayOrConflict(existing, fingerprint);
+            }
+            Set<String> distinctIds = new LinkedHashSet<>(speciesIds);
+            Map<String, SpeciesItem> species = fetchSpeciesOrThrow(distinctIds);
+            SightingGroupItem receipt = imageUrl == null ? null : groupItem(groupKey, SightingGrouping.photo(imageUrl));
+            SightingGroupItem state = groupItem(groupKey, "STATE");
+            SightingItem sighting = receipt != null ? readSighting(resolveId(receipt.getSightingId()))
+                    : state == null || state.getSightingId() == null ? null : readSighting(state.getSightingId());
+            if ((receipt != null || (state != null && state.getSightingId() != null)) && sighting == null) {
+                throw new IllegalStateException("Reserva de agrupamento aponta para avistamento inexistente");
+            }
+            boolean replay = receipt != null || (imageUrl == null && sighting != null);
+            boolean create = !replay && (sighting == null || photos(sighting).size() == SightingGrouping.MAX_PHOTOS);
+            Instant now = Instant.now();
+            var tx = TransactWriteItemsEnhancedRequest.builder();
+            if (create) {
+                if (state == null) state = newState(groupKey);
+                String id = UUID.randomUUID().toString();
+                sighting = new SightingItem();
+                sighting.setPk(SightingItem.keyFor(id));
+                sighting.setId(id);
+                sighting.setSpeciesIds(List.copyOf(distinctIds));
+                sighting.setCreatedAt(now);
+                sighting.setGroupKey(groupKey);
+                sighting.setGroupSequence(state.getNextSequence());
+                setCoordinates(sighting, date, time, species.get(speciesIds.getFirst()).getCommonName());
+                setPhotos(sighting, incoming);
+                sighting.setUpdatedAt(now);
+                state.setNextSequence(state.getNextSequence() + 1);
+                state.setLiveCount(state.getLiveCount() + 1);
+                state.setSightingId(id);
+                tx.addPutItem(sightingTable, TransactPutItemEnhancedRequest.builder(SightingItem.class)
+                        .item(sighting).conditionExpression(notExists()).build());
+                putGroup(tx, metadata(groupKey, SightingGrouping.member(sighting.getGroupSequence()), "SIGHTING_GROUP_MEMBER", id));
+                for (String speciesId : distinctIds) {
+                    tx.addPutItem(refTable, newRefItem(speciesId, sighting.getObservedAt(), id));
+                    SpeciesItem current = species.get(speciesId);
+                    current.setReferenceCount(current.getReferenceCount() + 1);
+                    current.setUpdatedAt(now);
+                    tx.addUpdateItem(speciesTable, current);
                 }
-
+                addNotificationJob(tx, id, now, distinctIds.size());
+            } else if (!replay) {
+                List<String> urls = new ArrayList<>(photos(sighting));
+                urls.add(imageUrl);
+                setPhotos(sighting, urls);
+                sighting.setUpdatedAt(now);
+                tx.addUpdateItem(sightingTable, sighting);
             }
-            if (DynamoDbSupport.hasConditionFailure(e.cancellationReasons())) {
-                throw new ConcurrentUpdateException("O registro foi alterado por outra operação. Tente novamente.");
+            if (!replay) {
+                writeState(tx, state);
+                if (imageUrl != null) putGroup(tx, metadata(groupKey, SightingGrouping.photo(imageUrl), "SIGHTING_PHOTO", sighting.getId()));
             }
-            RuntimeException translated = DynamoDbSupport.translateGeneric(e);
-            throw translated != null ? translated : new ConcurrentUpdateException(
-                    "O registro foi alterado por outra operação. Tente novamente.");
-        } catch (RuntimeException e) {
-            RuntimeException translated = DynamoDbSupport.translateGeneric(e);
-            throw translated != null ? translated : e;
+            if (idempotencyKey != null) {
+                SightingIdempotencyItem reservation = new SightingIdempotencyItem();
+                reservation.setPk(SightingIdempotencyItem.keyFor(idempotencyKey));
+                reservation.setIdempotencyKey(idempotencyKey);
+                reservation.setRequestFingerprint(fingerprint);
+                reservation.setSightingId(sighting.getId());
+                reservation.setCreatedAt(now);
+                tx.addPutItem(idempotencyTable, TransactPutItemEnhancedRequest.builder(SightingIdempotencyItem.class)
+                        .item(reservation).conditionExpression(notExists()).build());
+            } else if (replay) {
+                return toRecord(sighting);
+            }
+            try {
+                enhancedClient.transactWriteItems(tx.build());
+                return toRecord(sighting);
+            } catch (TransactionCanceledException e) {
+                if (!DynamoDbSupport.hasConditionFailure(e.cancellationReasons())
+                        && e.cancellationReasons().stream().noneMatch(reason -> "TransactionConflict".equals(reason.code()))) {
+                    throw Objects.requireNonNullElse(DynamoDbSupport.translateGeneric(e), e);
+                }
+            } catch (RuntimeException e) {
+                throw Objects.requireNonNullElse(DynamoDbSupport.translateGeneric(e), e);
+            }
         }
-
-        return toRecord(sighting);
+        throw new ConcurrentUpdateException("Agrupamento alterado simultaneamente; tente novamente");
     }
 
     @Override
     public Optional<SightingRecord> findById(String id) {
-        SightingItem item = sightingTable.getItem(GetItemEnhancedRequest.builder()
-                .key(sightingKey(id))
-                .consistentRead(true)
-                .build());
+        SightingItem item = readSighting(resolveId(id));
         return Optional.ofNullable(item).map(this::toRecord);
     }
 
@@ -279,14 +248,25 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
 
     @Override
     public SightingRecord update(String id, List<String> speciesIds, LocalDate date, LocalTime time, String imageUrl) {
-        SightingItem current = sightingTable.getItem(GetItemEnhancedRequest.builder()
-                .key(sightingKey(id))
-                .consistentRead(true)
-                .build());
-        if (current == null) {
-            throw new ResourceNotFoundException("Avistamento não encontrado");
+        SightingItem current = requireMutable(id);
+        List<String> urls = photos(current);
+        if (urls.size() > 1 && !Objects.equals(imageUrl, urls.getFirst())) {
+            throw new DuplicateResourceException("Use imageUrls para alterar uma galeria com várias fotos");
         }
+        return updateGallery(current, speciesIds, date, time,
+                urls.size() > 1 ? urls : imageUrl == null ? List.of() : List.of(imageUrl));
+    }
 
+    @Override
+    public SightingRecord updateGallery(String id, List<String> speciesIds, LocalDate date,
+                                        LocalTime time, List<String> imageUrls) {
+        return updateGallery(requireMutable(id), speciesIds, date, time, imageUrls);
+    }
+
+    private SightingRecord updateGallery(SightingItem current, List<String> speciesIds, LocalDate date,
+                                         LocalTime time, List<String> imageUrls) {
+        validatePhotos(imageUrls);
+        String id = current.getId();
         Set<String> oldIds = new LinkedHashSet<>(current.getSpeciesIds());
         Set<String> newIds = new LinkedHashSet<>(speciesIds);
         Set<String> added = new LinkedHashSet<>(newIds);
@@ -298,32 +278,65 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
         touchedSpecies.putAll(fetchSpeciesOrThrow(removed));
 
         Instant oldObservedAt = current.getObservedAt();
-        Instant newObservedAt = toInstant(date, time);
+        Instant newObservedAt = toInstant(date, SightingGrouping.minute(time));
         Instant now = Instant.now();
+        String oldGroupKey = current.getGroupKey();
+        String newGroupKey = SightingGrouping.key(speciesIds, date, time);
+        List<String> previousPhotos = photos(current);
+        SightingGroupItem source = requireState(oldGroupKey);
+        SightingGroupItem destination = source;
+        boolean moved = !oldGroupKey.equals(newGroupKey);
+        if (moved) {
+            destination = groupItem(newGroupKey, "STATE");
+            if (destination != null && destination.getLiveCount() > 0) {
+                if (id.equals(destination.getSightingId())) {
+                    throw new ConcurrentUpdateException("Avistamento alterado durante a correção; tente novamente");
+                }
+                throw new DuplicateResourceException("Já existe um grupo de avistamentos nesse minuto para essas espécies");
+            }
+            if (destination == null) destination = newState(newGroupKey);
+        }
 
-        current.setDate(date);
-        current.setTime(time);
-        current.setImageUrl(imageUrl);
+        setPhotos(current, imageUrls);
         current.setSpeciesIds(List.copyOf(newIds));
-        current.setObservedAt(newObservedAt);
-        current.setTimelinePk(SightingItem.TIMELINE_PK_PREFIX + YearMonth.from(date));
-        current.setTimelineSk(TimeKeys.sortable(newObservedAt) + "#" + id);
-        current.setPrimarySpeciesPk(SightingItem.PRIMARY_SPECIES_PK);
-        current.setPrimarySpeciesSk(primarySpeciesSortKey(
-                touchedSpecies.get(newIds.iterator().next()).getCommonName(), newObservedAt, id));
+        setCoordinates(current, date, time, touchedSpecies.get(newIds.iterator().next()).getCommonName());
         current.setUpdatedAt(now);
 
-        TransactWriteItemsEnhancedRequest.Builder tx = TransactWriteItemsEnhancedRequest.builder()
-                .addUpdateItem(sightingTable, current);
+        TransactWriteItemsEnhancedRequest.Builder tx = TransactWriteItemsEnhancedRequest.builder();
+        if (moved) {
+            detachMember(tx, source, current);
+            current.setGroupKey(newGroupKey);
+            current.setGroupSequence(destination.getNextSequence());
+            destination.setNextSequence(destination.getNextSequence() + 1);
+            destination.setLiveCount(1L);
+            destination.setSightingId(id);
+            putGroup(tx, metadata(newGroupKey, SightingGrouping.member(current.getGroupSequence()), "SIGHTING_GROUP_MEMBER", id));
+            writeState(tx, source);
+        }
+        writeState(tx, destination);
+        for (String url : previousPhotos) {
+            if (moved || !imageUrls.contains(url)) tx.addDeleteItem(groups, groupKey(oldGroupKey, SightingGrouping.photo(url)));
+        }
+        for (String url : imageUrls) {
+            if (moved || !previousPhotos.contains(url)) {
+                SightingGroupItem receipt = groupItem(newGroupKey, SightingGrouping.photo(url));
+                if (receipt != null) throw new DuplicateResourceException("Foto já associada a outro avistamento dessa combinação");
+                putGroup(tx, metadata(newGroupKey, SightingGrouping.photo(url), "SIGHTING_PHOTO", id));
+            }
+        }
+        tx.addUpdateItem(sightingTable, current);
 
         for (String speciesId : oldIds) {
-            tx.addDeleteItem(refTable, Key.builder()
-                    .partitionValue(SpeciesSightingRefItem.pkFor(speciesId))
-                    .sortValue(SpeciesSightingRefItem.skFor(oldObservedAt, id))
-                    .build());
+            if (!newIds.contains(speciesId) || !oldObservedAt.equals(newObservedAt)) {
+                tx.addDeleteItem(refTable, Key.builder()
+                        .partitionValue(SpeciesSightingRefItem.pkFor(speciesId))
+                        .sortValue(SpeciesSightingRefItem.skFor(oldObservedAt, id)).build());
+            }
         }
         for (String speciesId : newIds) {
-            tx.addPutItem(refTable, newRefItem(speciesId, newObservedAt, id));
+            if (!oldIds.contains(speciesId) || !oldObservedAt.equals(newObservedAt)) {
+                tx.addPutItem(refTable, newRefItem(speciesId, newObservedAt, id));
+            }
         }
         for (String speciesId : added) {
             SpeciesItem item = touchedSpecies.get(speciesId);
@@ -345,20 +358,18 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
 
     @Override
     public void delete(String id) {
-        SightingItem current = sightingTable.getItem(GetItemEnhancedRequest.builder()
-                .key(sightingKey(id))
-                .consistentRead(true)
-                .build());
-        if (current == null) {
-            throw new ResourceNotFoundException("Avistamento não encontrado");
-        }
+        SightingItem current = requireMutable(id);
 
         Set<String> speciesIds = new LinkedHashSet<>(current.getSpeciesIds());
         Map<String, SpeciesItem> species = fetchSpeciesOrThrow(speciesIds);
         Instant now = Instant.now();
 
-        TransactWriteItemsEnhancedRequest.Builder tx = TransactWriteItemsEnhancedRequest.builder()
-                .addDeleteItem(sightingTable, sightingKey(id));
+        TransactWriteItemsEnhancedRequest.Builder tx = TransactWriteItemsEnhancedRequest.builder();
+        SightingGroupItem state = requireState(current.getGroupKey());
+        detachMember(tx, state, current);
+        writeState(tx, state);
+        for (String url : photos(current)) tx.addDeleteItem(groups, groupKey(current.getGroupKey(), SightingGrouping.photo(url)));
+        tx.addDeleteItem(sightingTable, sightingKey(id));
 
         for (String speciesId : speciesIds) {
             tx.addDeleteItem(refTable, Key.builder()
@@ -617,6 +628,118 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
         return Key.builder().partitionValue(SightingItem.keyFor(id)).sortValue(SightingItem.DETAILS_SORT_KEY).build();
     }
 
+    private SightingItem readSighting(String id) {
+        return sightingTable.getItem(GetItemEnhancedRequest.builder().key(sightingKey(id)).consistentRead(true).build());
+    }
+
+    private String resolveId(String id) {
+        Set<String> visited = new LinkedHashSet<>();
+        for (int depth = 0; depth < 16; depth++) {
+            if (!visited.add(id)) throw new IllegalStateException("Ciclo em aliases de avistamento");
+            SightingGroupItem alias = groupItem("SIGHTING_ALIAS#" + id, "TARGET");
+            if (alias == null) return id;
+            if (alias.getSightingId() == null) throw new IllegalStateException("Alias de avistamento sem destino");
+            id = alias.getSightingId();
+        }
+        throw new IllegalStateException("Cadeia de aliases de avistamento excedida");
+    }
+
+    private SightingItem requireMutable(String id) {
+        String resolved = resolveId(id);
+        if (!id.equals(resolved)) throw new DuplicateResourceException("Avistamento consolidado; use o ID " + resolved);
+        SightingItem current = readSighting(id);
+        if (current == null) throw new ResourceNotFoundException("Avistamento não encontrado");
+        if (current.getGroupKey() == null) {
+            throw new tcc.aves.exception.ServiceUnavailableException("Avistamento legado aguarda migração de agrupamento");
+        }
+        return current;
+    }
+
+    private static Key groupKey(String pk, String sk) {
+        return Key.builder().partitionValue(pk).sortValue(sk).build();
+    }
+
+    private SightingGroupItem groupItem(String pk, String sk) {
+        return groups.getItem(GetItemEnhancedRequest.builder().key(groupKey(pk, sk)).consistentRead(true).build());
+    }
+
+    private SightingGroupItem requireState(String pk) {
+        SightingGroupItem state = groupItem(pk, "STATE");
+        if (state == null) throw new IllegalStateException("Estado do agrupamento não encontrado");
+        return state;
+    }
+
+    private static SightingGroupItem metadata(String pk, String sk, String type, String id) {
+        SightingGroupItem item = new SightingGroupItem();
+        item.setPk(pk);
+        item.setSk(sk);
+        item.setItemType(type);
+        item.setSightingId(id);
+        return item;
+    }
+
+    private static SightingGroupItem newState(String pk) {
+        SightingGroupItem state = metadata(pk, "STATE", "SIGHTING_GROUP", null);
+        state.setNextSequence(1L);
+        state.setLiveCount(0L);
+        return state;
+    }
+
+    private void putGroup(TransactWriteItemsEnhancedRequest.Builder tx, SightingGroupItem item) {
+        tx.addPutItem(groups, TransactPutItemEnhancedRequest.builder(SightingGroupItem.class)
+                .item(item).conditionExpression(notExists()).build());
+    }
+
+    private void writeState(TransactWriteItemsEnhancedRequest.Builder tx, SightingGroupItem state) {
+        if (state.getVersion() == null) putGroup(tx, state);
+        else tx.addUpdateItem(groups, state);
+    }
+
+    private void detachMember(TransactWriteItemsEnhancedRequest.Builder tx, SightingGroupItem state, SightingItem current) {
+        state.setLiveCount(state.getLiveCount() - 1);
+        if (state.getLiveCount() < 0) throw new IllegalStateException("Contador de agrupamento inconsistente");
+        if (current.getId().equals(state.getSightingId())) {
+            String remaining = groups.query(QueryEnhancedRequest.builder()
+                    .queryConditional(QueryConditional.sortBeginsWith(groupKey(current.getGroupKey(), "MEMBER#")))
+                    .consistentRead(true).scanIndexForward(false).limit(2).build()).items().stream()
+                    .filter(item -> !current.getId().equals(item.getSightingId()))
+                    .map(SightingGroupItem::getSightingId).findFirst().orElse(null);
+            if (remaining == null && state.getLiveCount() != 0) throw new IllegalStateException("Membros do agrupamento inconsistentes");
+            state.setSightingId(remaining);
+        }
+        tx.addDeleteItem(groups, groupKey(current.getGroupKey(), SightingGrouping.member(current.getGroupSequence())));
+    }
+
+    private static List<String> photos(SightingItem sighting) {
+        return sighting.getImageUrls() != null ? List.copyOf(sighting.getImageUrls())
+                : sighting.getImageUrl() == null ? List.of() : List.of(sighting.getImageUrl());
+    }
+
+    private static void validatePhotos(List<String> urls) {
+        if (urls == null || urls.size() > SightingGrouping.MAX_PHOTOS
+                || urls.stream().anyMatch(url -> url == null || url.isBlank() || url.length() > 2048)
+                || new LinkedHashSet<>(urls).size() != urls.size()) {
+            throw new IllegalArgumentException("Galeria deve conter até 4 URLs distintas, não vazias e com até 2048 caracteres");
+        }
+    }
+
+    private static void setPhotos(SightingItem sighting, List<String> urls) {
+        sighting.setImageUrls(List.copyOf(urls));
+        sighting.setImageUrl(urls.isEmpty() ? null : urls.getFirst());
+    }
+
+    private void setCoordinates(SightingItem sighting, LocalDate date, LocalTime time, String primaryName) {
+        LocalTime minute = SightingGrouping.minute(time);
+        Instant observedAt = toInstant(date, minute);
+        sighting.setDate(date);
+        sighting.setTime(minute);
+        sighting.setObservedAt(observedAt);
+        sighting.setTimelinePk(SightingItem.TIMELINE_PK_PREFIX + YearMonth.from(date));
+        sighting.setTimelineSk(TimeKeys.sortable(observedAt) + "#" + sighting.getId());
+        sighting.setPrimarySpeciesPk(SightingItem.PRIMARY_SPECIES_PK);
+        sighting.setPrimarySpeciesSk(primarySpeciesSortKey(primaryName, observedAt, sighting.getId()));
+    }
+
     private SightingIdempotencyItem getIdempotencyItem(String idempotencyKey) {
         return idempotencyTable.getItem(GetItemEnhancedRequest.builder()
                 .key(Key.builder()
@@ -638,10 +761,7 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
             throw new DuplicateResourceException(
                     "Idempotency-Key já foi usada com uma requisição diferente");
         }
-        SightingItem sighting = sightingTable.getItem(GetItemEnhancedRequest.builder()
-                .key(sightingKey(existing.getSightingId()))
-                .consistentRead(true)
-                .build());
+        SightingItem sighting = readSighting(resolveId(existing.getSightingId()));
         if (sighting == null) {
             throw new ResourceNotFoundException(
                     "Avistamento associado à chave de idempotência não foi encontrado");
@@ -682,14 +802,16 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
     }
 
     private SightingRecord toRecord(SightingItem item) {
+        List<String> urls = photos(item);
         return new SightingRecord(
                 item.getId(),
                 item.getSpeciesIds(),
                 item.getDate(),
                 item.getTime(),
-                item.getImageUrl(),
+                urls.isEmpty() ? null : urls.getFirst(),
                 item.getCreatedAt(),
-                item.getUpdatedAt()
+                item.getUpdatedAt(),
+                urls
         );
     }
 }

@@ -27,12 +27,13 @@ O índice de timeline permanece esparso e não contém notificações.
 
 | Item | Partição / sort key | Garantia |
 |---|---|---|
-| Perfil | `NOTIF#USER#id` / `PROFILE` | Início original, preferência e contador |
+| Perfil | `NOTIF#USER#id` / `PROFILE` | Início original, preferência, geração da caixa, marco de limpeza e contador |
 | Participante | `NOTIF#PARTICIPANTS` / `epochMillis(19 dígitos)#userId` | Query paginada |
 | Dispositivo | `NOTIF#USER#id` / `DEVICE#installationId` | Token nativo e geração UUID |
 | Reserva | `NOTIF#TOKEN#sha256(token)` / `OWNER` | Dono único, transferência atômica |
-| Caixa | `NOTIF#USER#id` / `INBOX#epochMillis#sightingId` | Query consistente, ordem decrescente |
+| Caixa | `NOTIF#USER#id` / `INBOX#epochMillis#sightingId` (geração 0) ou `INBOXG#geração#epochMillis#sightingId` | Query consistente somente da geração ativa |
 | Localizador | `NOTIF#USER#id` / `NOTIFICATION#sightingId` | Resolve aviso por ID estável |
+| Recibo de limpeza | `NOTIF#USER#id` / `CLEAR#sha256(Idempotency-Key)` | Resultado persistente da confirmação, sem TTL |
 | Evento | `NOTIF#EVENT#sightingId` / `STATE` | Snapshot, lease de 120 s, checkpoints |
 | Tentativa | `NOTIF#EVENT#sightingId` / `PUSH#generation` | Lease de 30 s e resultado |
 | Pendente | `NOTIF#PENDING` / `epochMillis(próximo prazo)#sightingId` | Query de vencidos, sem Scan |
@@ -62,6 +63,7 @@ nunca do corpo. Erros seguem `ApiError`; tokens não aparecem em respostas.
 | PUT `/api/notification-devices/{installationId}` | `{token:string}`; 204 |
 | DELETE `/api/notification-devices/{installationId}` | Desativação idempotente; 204 |
 | GET `/api/notifications?limit=20&cursor=...` | `{items,nextCursor}`; limite 1–50 |
+| DELETE `/api/notifications` | `Idempotency-Key` obrigatória (1–128 letras, dígitos, `_` ou `-`); 204 |
 | GET `/api/notifications/unread-count` | `{unreadCount}` |
 | PATCH `/api/notifications/{id}/read` | Aviso com leitura confirmada |
 | POST `/api/internal/notification-jobs/process` | Sem corpo; `{completed,deferred,failed}` |
@@ -71,6 +73,37 @@ configurado para a conta de serviço já existente. JWT ausente/inválido/de
 conta excluída: 401; outra conta: 403; executor sem configuração/desabilitado:
 503. Não aceitar parâmetros de envio; vazio ou `{}` são permitidos.
 O worker não recebe token de dispositivo nem chave FCM.
+
+### Limpar a caixa
+
+`DELETE /api/notifications` avança `inboxGeneration`, zera `unreadCount` e
+persiste `clearedThrough` e o recibo da chave na mesma transação que verifica
+a existência da conta. O marco usa `Instant` com precisão de nanossegundos
+da **criação do evento**, não o horário da foto. Eventos com criação menor
+ou igual ao marco não entram; um evento posterior no mesmo milissegundo
+continua elegível. Perfis e localizadores legados sem geração significam 0.
+
+Somente a caixa visível é removida. Permanecem início da participação,
+preferência, dados da conta, dispositivos, localizadores, histórico físico,
+checkpoints e ledger FCM. Repetir a mesma chave devolve 204 sem limpar avisos
+novos; outra confirmação deve usar outra chave. Não há TTL dos recibos.
+Criação e leitura condicionam o contador à geração lida e reavaliam conflitos:
+leitura de aviso limpo retorna 404; nenhum decremento atinge a geração nova.
+Cursores incluem conta e geração; um cursor anterior à limpeza retorna 400,
+exigindo recarregar a primeira página.
+
+O dispatcher e a reserva transacional de tentativa FCM verificam marco e
+geração do localizador. Um aviso de geração antiga é inelegível mesmo que
+tenha timestamp futuro; eventos atrasados não ressurgem. A conta B não é
+afetada por uma limpeza na conta A. Não é possível recolher um envio já
+em andamento/aceito pelo FCM, nem limpar a central nativa do Android.
+
+No app a ação pede confirmação, permite cancelar sem requisição e mostra
+carregamento/erro. Falha conserva a caixa e a mesma chave para retry; sucesso
+invalida respostas de listagem/leitura/contador/sincronização anteriores,
+zera o estado local e reconcilia eventos realmente novos. Troca de conta
+invalida respostas da sessão antiga. Outra instalação observa a limpeza
+persistida na próxima consulta.
 
 Até dez trabalhos vencidos por chamada. Orçamento monotônico de 20 s começa
 antes da consulta de autenticação; margem de 15 s impede assumir mais trabalho

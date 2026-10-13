@@ -12,6 +12,12 @@ public record SightingResponse(
         LocalTime time,
         String imageUrl,
         Instant createdAt,
-        Instant updatedAt
+        Instant updatedAt,
+        List<String> imageUrls
 ) {
+    public SightingResponse(String id, List<SpeciesResponse> species, LocalDate date, LocalTime time,
+                            String imageUrl, Instant createdAt, Instant updatedAt) {
+        this(id, species, date, time, imageUrl, createdAt, updatedAt,
+                imageUrl == null ? List.of() : List.of(imageUrl));
+    }
 }

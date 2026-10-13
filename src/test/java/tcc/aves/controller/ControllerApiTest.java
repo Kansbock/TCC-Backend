@@ -288,6 +288,34 @@ class ControllerApiTest {
                 """;
     }
 
+    @Test
+    void maintenanceBlocksSightingWritesButKeepsReadsAvailable() throws Exception {
+        SightingController controller = webApplicationContext.getBean(SightingController.class);
+        Object previous = org.springframework.test.util.ReflectionTestUtils.getField(controller, "writesPaused");
+        org.springframework.test.util.ReflectionTestUtils.setField(controller, "writesPaused", true);
+        String body = """
+                {"speciesIds":["synthetic-species"],"date":"2026-09-10","time":"10:15:00","imageUrl":"https://synthetic.test/photo"}
+                """;
+        try {
+            mockMvc.perform(post("/api/sightings").header("Authorization", bearer(SELF_ID, EMAIL))
+                            .contentType(MediaType.APPLICATION_JSON).content(body))
+                    .andExpect(status().isServiceUnavailable()).andExpect(jsonPath("$.status").value(503));
+            mockMvc.perform(put("/api/sightings/sig-1").header("Authorization", bearer(SELF_ID, EMAIL))
+                            .contentType(MediaType.APPLICATION_JSON).content(body))
+                    .andExpect(status().isServiceUnavailable());
+            mockMvc.perform(delete("/api/sightings/sig-1").header("Authorization", bearer(SELF_ID, EMAIL)))
+                    .andExpect(status().isServiceUnavailable());
+            verifyNoInteractions(sightingService);
+            Instant now = Instant.parse("2026-09-10T10:15:00Z");
+            when(sightingService.findById("sig-1")).thenReturn(new SightingResponse(
+                    "sig-1", List.of(), LocalDate.of(2026, 9, 10), LocalTime.of(10, 15), null, now, now));
+            mockMvc.perform(get("/api/sightings/sig-1").header("Authorization", bearer(SELF_ID, EMAIL)))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.id").value("sig-1"));
+        } finally {
+            org.springframework.test.util.ReflectionTestUtils.setField(controller, "writesPaused", previous);
+        }
+    }
+
     private String bearer(String userId, String email) {
         return "Bearer " + jwtUtil.generateToken(userId, email);
     }

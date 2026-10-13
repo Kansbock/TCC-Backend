@@ -150,10 +150,12 @@ public class NotificationRepositoryDynamoDbAdapter implements NotificationReposi
 
     @Override
     public Page<Notice> inbox(String userId, int limit, String cursor) {
+        long generation = number(requireProfile(userId), "inboxGeneration");
+        String prefix = inboxPrefix(generation);
         QueryEnhancedRequest.Builder request = QueryEnhancedRequest.builder()
                 .queryConditional(QueryConditional.sortBetween(
-                        Key.builder().partitionValue(user(userId)).sortValue("INBOX#").build(),
-                        Key.builder().partitionValue(user(userId)).sortValue("INBOX#~").build()))
+                        Key.builder().partitionValue(user(userId)).sortValue(prefix).build(),
+                        Key.builder().partitionValue(user(userId)).sortValue(prefix + "~").build()))
                 .scanIndexForward(false).consistentRead(true).limit(limit);
         if (cursor != null && !cursor.isBlank()) {
             String decoded;
@@ -161,9 +163,10 @@ public class NotificationRepositoryDynamoDbAdapter implements NotificationReposi
                 if (cursor.length() > 1024) throw new IllegalArgumentException();
                 decoded = new String(Base64.getUrlDecoder().decode(cursor), StandardCharsets.UTF_8);
                 String[] parts = decoded.split("\\|", -1);
-                if (parts.length != 2 || !parts[0].equals(userId)
-                        || !parts[1].matches("[0-9]{19}#[A-Za-z0-9_-]{1,128}")) throw new IllegalArgumentException();
-                request.exclusiveStartKey(key(user(userId), "INBOX#" + parts[1]));
+                if (parts.length != 3 || !parts[0].equals(userId)
+                        || !parts[1].equals(Long.toString(generation))
+                        || !parts[2].matches("[0-9]{19}#[A-Za-z0-9_-]{1,128}")) throw new IllegalArgumentException();
+                request.exclusiveStartKey(key(user(userId), prefix + parts[2]));
             } catch (IllegalArgumentException e) {
                 throw new IllegalArgumentException("Cursor de notificações inválido");
             }
@@ -172,27 +175,81 @@ public class NotificationRepositoryDynamoDbAdapter implements NotificationReposi
                 documents.query(request.build()).iterator().next();
         String next = page.lastEvaluatedKey() == null || page.lastEvaluatedKey().isEmpty() ? null
                 : Base64.getUrlEncoder().withoutPadding().encodeToString(
-                (userId + "|" + page.lastEvaluatedKey().get("sk").s().substring(6)).getBytes(StandardCharsets.UTF_8));
+                (userId + "|" + generation + "|" + page.lastEvaluatedKey().get("sk").s().substring(prefix.length()))
+                        .getBytes(StandardCharsets.UTF_8));
+        if (number(requireProfile(userId), "inboxGeneration") != generation) {
+            throw new IllegalArgumentException("Caixa de notificações mudou; recarregue a primeira página");
+        }
         return new Page<>(page.items().stream().map(d -> notice(d.toMap())).toList(), next);
+    }
+
+    @Override
+    public void clearInbox(String userId, String idempotencyKey, Instant now) {
+        String receiptKey = "CLEAR#" + hash(idempotencyKey);
+        for (int retry = 0; retry < 5; retry++) {
+            Map<String, AttributeValue> profile = requireProfile(userId);
+            if (!get(user(userId), receiptKey).isEmpty()) {
+                try {
+                    transact(userExists(userId));
+                    return;
+                } catch (TransactionCanceledException e) {
+                    if (conditional(e, 0)) throw new ResourceNotFoundException("Conta não encontrada");
+                    throw e;
+                }
+            }
+            long generation = number(profile, "inboxGeneration");
+            Instant previous = profile.containsKey("clearedThrough")
+                    ? Instant.parse(text(profile, "clearedThrough")) : Instant.MIN;
+            Instant cutoff = now.isAfter(previous) ? now : previous;
+            Map<String, AttributeValue> values = inboxGenerationValues(generation);
+            values.put(":next", n(generation + 1));
+            values.put(":zero", n(0));
+            values.put(":cutoff", s(cutoff.toString()));
+            try {
+                transact(update(key(user(userId), "PROFILE"),
+                                "SET inboxGeneration = :next, unreadCount = :zero, clearedThrough = :cutoff",
+                                "attribute_exists(pk) AND " + inboxGenerationCondition(generation), values),
+                        put(item(user(userId), receiptKey, "inboxGeneration", n(generation + 1),
+                                        "clearedThrough", s(cutoff.toString())),
+                                "attribute_not_exists(pk)", Map.of()),
+                        userExists(userId));
+                return;
+            } catch (TransactionCanceledException e) {
+                if (conditional(e, 2)) throw new ResourceNotFoundException("Conta não encontrada");
+                if (!hasConditional(e)) throw e;
+            }
+        }
+        throw new ConcurrentUpdateException("Caixa mudou durante a limpeza; tente novamente com a mesma Idempotency-Key");
     }
 
     @Override
     public Notice markRead(String userId, String id, Instant now) {
         for (int retry = 0; retry < 3; retry++) {
+            long generation = number(requireProfile(userId), "inboxGeneration");
             Map<String, AttributeValue> locator = get(user(userId), "NOTIFICATION#" + id);
-            if (locator.isEmpty()) throw new ResourceNotFoundException("Notificação não encontrada");
+            if (locator.isEmpty() || number(locator, "inboxGeneration") != generation) {
+                throw new ResourceNotFoundException("Notificação não encontrada");
+            }
             String inboxKey = text(locator, "inboxKey");
             Map<String, AttributeValue> current = get(user(userId), inboxKey);
             if (current.isEmpty()) throw new ResourceNotFoundException("Notificação não encontrada");
-            if (current.containsKey("readAt")) return notice(current);
+            if (current.containsKey("readAt")) {
+                if (number(requireProfile(userId), "inboxGeneration") != generation) continue;
+                return notice(current);
+            }
+            Map<String, AttributeValue> values = inboxGenerationValues(generation);
+            values.put(":minus", n(-1));
+            values.put(":one", n(1));
             try {
                 transact(update(key(user(userId), inboxKey), "SET readAt = :at",
                                 "attribute_exists(pk) AND attribute_not_exists(readAt)", Map.of(":at", s(now.toString()))),
                         update(key(user(userId), "PROFILE"), "ADD unreadCount :minus",
-                                "attribute_exists(pk) AND unreadCount >= :one", Map.of(":minus", n(-1), ":one", n(1))));
+                                "attribute_exists(pk) AND unreadCount >= :one AND " + inboxGenerationCondition(generation), values),
+                        userExists(userId));
                 return notice(get(user(userId), inboxKey));
             } catch (TransactionCanceledException e) {
-                if (!conditional(e, 0)) throw e;
+                if (conditional(e, 2)) throw new ResourceNotFoundException("Conta não encontrada");
+                if (!hasConditional(e)) throw e;
             }
         }
         throw new ConcurrentUpdateException("Leitura mudou durante a atualização; tente novamente");
@@ -227,23 +284,31 @@ public class NotificationRepositoryDynamoDbAdapter implements NotificationReposi
 
     @Override
     public boolean createNotice(String userId, Event event) {
-        Map<String, AttributeValue> profile = get(user(userId), "PROFILE");
-        if (profile.isEmpty() || event.createdAt().isBefore(Instant.parse(text(profile, "startedAt")))) return false;
-        String inboxKey = "INBOX#" + order(event.createdAt(), event.sightingId());
-        Map<String, AttributeValue> notification = item(user(userId), inboxKey,
-                "sightingId", s(event.sightingId()), "createdAt", s(event.createdAt().toString()),
-                "title", s(event.title()), "body", s(event.body()));
-        try {
-            transact(put(notification, "attribute_not_exists(pk)", Map.of()),
-                    update(key(user(userId), "PROFILE"), "ADD unreadCount :one", "attribute_exists(pk)", Map.of(":one", n(1))),
-                    userExists(userId),
-                    put(item(user(userId), "NOTIFICATION#" + event.sightingId(), "inboxKey", s(inboxKey)),
-                            "attribute_not_exists(pk)", Map.of()));
-            return true;
-        } catch (TransactionCanceledException e) {
-            if (conditional(e, 0) || conditional(e, 2)) return false;
-            throw e;
+        for (int retry = 0; retry < 5; retry++) {
+            Map<String, AttributeValue> profile = get(user(userId), "PROFILE");
+            if (!eventEligible(profile, event)) return false;
+            long generation = number(profile, "inboxGeneration");
+            String inboxKey = inboxPrefix(generation) + order(event.createdAt(), event.sightingId());
+            Map<String, AttributeValue> notification = item(user(userId), inboxKey,
+                    "sightingId", s(event.sightingId()), "createdAt", s(event.createdAt().toString()),
+                    "inboxGeneration", n(generation), "title", s(event.title()), "body", s(event.body()));
+            Map<String, AttributeValue> values = inboxGenerationValues(generation);
+            values.put(":one", n(1));
+            try {
+                transact(put(notification, "attribute_not_exists(pk)", Map.of()),
+                        update(key(user(userId), "PROFILE"), "ADD unreadCount :one",
+                                "attribute_exists(pk) AND " + inboxGenerationCondition(generation), values),
+                        userExists(userId),
+                        put(item(user(userId), "NOTIFICATION#" + event.sightingId(),
+                                        "inboxKey", s(inboxKey), "inboxGeneration", n(generation)),
+                                "attribute_not_exists(pk)", Map.of()));
+                return true;
+            } catch (TransactionCanceledException e) {
+                if (conditional(e, 0) || conditional(e, 2) || conditional(e, 3)) return false;
+                if (!hasConditional(e)) throw e;
+            }
         }
+        throw new ConcurrentUpdateException("Caixa mudou durante a criação; tente novamente");
     }
 
     @Override
@@ -256,6 +321,14 @@ public class NotificationRepositoryDynamoDbAdapter implements NotificationReposi
                 && device.generation().equals(text(reservation, "generation"))
                 && !client.getItem(r -> r.tableName(usersTable).consistentRead(true)
                 .key(Map.of("pk", s("USER#" + device.userId())))).item().isEmpty();
+    }
+
+    @Override
+    public boolean eligible(Device device, Event event) {
+        Map<String, AttributeValue> profile = get(user(device.userId()), "PROFILE");
+        Map<String, AttributeValue> locator = get(user(device.userId()), "NOTIFICATION#" + event.sightingId());
+        return eventEligible(profile, event) && !locator.isEmpty()
+                && number(locator, "inboxGeneration") == number(profile, "inboxGeneration") && eligible(device);
     }
 
     @Override
@@ -308,6 +381,14 @@ public class NotificationRepositoryDynamoDbAdapter implements NotificationReposi
 
     @Override
     public boolean claimAttempt(Event event, Device device, Instant now) {
+        Map<String, AttributeValue> profile = get(user(device.userId()), "PROFILE");
+        long generation = number(profile, "inboxGeneration");
+        Map<String, AttributeValue> locator = get(user(device.userId()), "NOTIFICATION#" + event.sightingId());
+        if (!eventEligible(profile, event) || locator.isEmpty()
+                || number(locator, "inboxGeneration") != generation) return false;
+        Map<String, AttributeValue> profileValues = inboxGenerationValues(generation);
+        profileValues.put(":at", s(now.toString()));
+        profileValues.put(":true", bool(true));
         try {
             transact(update(key("NOTIF#EVENT#" + event.sightingId(), attemptKey(device)),
                             "SET #status = :sending, leaseUntil = :until ADD attempts :one",
@@ -321,7 +402,7 @@ public class NotificationRepositoryDynamoDbAdapter implements NotificationReposi
                             "active = :true AND generation = :g",
                             Map.of(":at", s(now.toString()), ":true", bool(true), ":g", s(device.generation()))),
                     update(key(user(device.userId()), "PROFILE"), "SET lastPushAttemptAt = :at",
-                            "pushEnabled = :true", Map.of(":at", s(now.toString()), ":true", bool(true))),
+                            "pushEnabled = :true AND " + inboxGenerationCondition(generation), profileValues),
                     update(key("NOTIF#TOKEN#" + hash(device.token()), "OWNER"), "SET lastPushAttemptAt = :at",
                             "generation = :g", Map.of(":at", s(now.toString()), ":g", s(device.generation()))),
                     userExists(device.userId()));
@@ -386,6 +467,31 @@ public class NotificationRepositoryDynamoDbAdapter implements NotificationReposi
         EnhancedDocument document = documents.getItem(GetItemEnhancedRequest.builder()
                 .key(Key.builder().partitionValue(pk).sortValue(sk).build()).consistentRead(true).build());
         return document == null ? Map.of() : document.toMap();
+    }
+
+    private Map<String, AttributeValue> requireProfile(String userId) {
+        Map<String, AttributeValue> profile = get(user(userId), "PROFILE");
+        if (profile.isEmpty()) throw new ResourceNotFoundException("Participação não encontrada");
+        return profile;
+    }
+
+    private static boolean eventEligible(Map<String, AttributeValue> profile, Event event) {
+        return !profile.isEmpty() && !event.createdAt().isBefore(Instant.parse(text(profile, "startedAt")))
+                && (!profile.containsKey("clearedThrough")
+                || event.createdAt().isAfter(Instant.parse(text(profile, "clearedThrough"))));
+    }
+
+    private static String inboxPrefix(long generation) {
+        return generation == 0 ? "INBOX#" : "INBOXG#" + generation + "#";
+    }
+
+    private static String inboxGenerationCondition(long generation) {
+        return generation == 0 ? "(attribute_not_exists(inboxGeneration) OR inboxGeneration = :generation)"
+                : "inboxGeneration = :generation";
+    }
+
+    private static Map<String, AttributeValue> inboxGenerationValues(long generation) {
+        return new HashMap<>(Map.of(":generation", n(generation)));
     }
 
     private void transact(TransactWriteItem... writes) {

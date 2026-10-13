@@ -58,6 +58,14 @@ public class NotificationService {
         return repository.markRead(userId, id, Instant.now());
     }
 
+    public void clear(String userId, String idempotencyKey) {
+        requireUser(userId);
+        if (idempotencyKey == null || !idempotencyKey.matches("[A-Za-z0-9_-]{1,128}")) {
+            throw new IllegalArgumentException("Idempotency-Key inválida ou ausente");
+        }
+        repository.clearInbox(userId, idempotencyKey, Instant.now());
+    }
+
     private void requireUser(String id) {
         if (users.findById(id).isEmpty()) throw new ResourceNotFoundException("Conta não encontrada");
     }

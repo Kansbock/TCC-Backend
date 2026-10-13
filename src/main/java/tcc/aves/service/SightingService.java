@@ -5,6 +5,7 @@ import tcc.aves.config.SightingProperties;
 import tcc.aves.dto.CursorPage;
 import tcc.aves.dto.SightingRequest;
 import tcc.aves.dto.SightingResponse;
+import tcc.aves.dto.SightingUpdateRequest;
 import tcc.aves.dto.SpeciesResponse;
 import tcc.aves.exception.ResourceNotFoundException;
 import tcc.aves.repository.SightingPage;
@@ -79,6 +80,19 @@ public class SightingService {
 
     public void delete(String id) {
         sightingRepository.delete(id);
+    }
+
+    public SightingResponse updateGallery(String id, SightingUpdateRequest request) {
+        validateSpeciesIds(request.speciesIds());
+        if (request.imageUrls() == null) {
+            return update(id, new SightingRequest(request.speciesIds(), request.date(), request.time(), request.imageUrl()));
+        }
+        if (request.imageUrl() != null && (request.imageUrls().isEmpty()
+                || !request.imageUrl().equals(request.imageUrls().getFirst()))) {
+            throw new IllegalArgumentException("imageUrl deve corresponder à primeira foto de imageUrls");
+        }
+        return toResponse(sightingRepository.updateGallery(
+                id, request.speciesIds(), request.date(), request.time(), request.imageUrls()));
     }
 
     /**
@@ -200,7 +214,8 @@ public class SightingService {
                 record.time(),
                 record.imageUrl(),
                 record.createdAt(),
-                record.updatedAt()
+                record.updatedAt(),
+                record.imageUrls()
         );
     }
 

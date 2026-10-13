@@ -44,6 +44,9 @@ public class SightingItem {
     private LocalDate date;
     private LocalTime time;
     private String imageUrl;
+    private List<String> imageUrls;
+    private String groupKey;
+    private Long groupSequence;
     private List<String> speciesIds;
     private Instant observedAt;
     private String timelinePk;
@@ -115,6 +118,13 @@ public class SightingItem {
     public void setImageUrl(String imageUrl) {
         this.imageUrl = imageUrl;
     }
+
+    public List<String> getImageUrls() { return imageUrls; }
+    public void setImageUrls(List<String> imageUrls) { this.imageUrls = imageUrls; }
+    public String getGroupKey() { return groupKey; }
+    public void setGroupKey(String groupKey) { this.groupKey = groupKey; }
+    public Long getGroupSequence() { return groupSequence; }
+    public void setGroupSequence(Long groupSequence) { this.groupSequence = groupSequence; }
 
     public List<String> getSpeciesIds() {
         return speciesIds;

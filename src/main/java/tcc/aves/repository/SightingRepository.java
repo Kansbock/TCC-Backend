@@ -38,6 +38,8 @@ public interface SightingRepository {
      */
     SightingRecord update(String id, List<String> speciesIds, LocalDate date, LocalTime time, String imageUrl);
 
+    SightingRecord updateGallery(String id, List<String> speciesIds, LocalDate date, LocalTime time, List<String> imageUrls);
+
     /** Lança {@code ResourceNotFoundException} se o avistamento não existir. */
     void delete(String id);
 

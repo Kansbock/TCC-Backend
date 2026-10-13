@@ -77,7 +77,7 @@ public class NotificationDispatcher {
     }
 
     private void push(Event event, Device device, IntSupplier remaining) {
-        if (!repository.eligible(device)) return;
+        if (!repository.eligible(device, event)) return;
         deadline(remaining);
         Instant now = clock.instant();
         Attempt previous = repository.attempt(event, device);
@@ -90,7 +90,7 @@ public class NotificationDispatcher {
                     previous.nextAttemptAt().isAfter(previous.leaseUntil()) ? previous.nextAttemptAt() : previous.leaseUntil(), false);
         }
         if (!repository.claimAttempt(event, device, now)) {
-            if (repository.eligible(device)) throw new IllegalStateException("Tentativa FCM concorrente");
+            if (repository.eligible(device, event)) throw new IllegalStateException("Tentativa FCM concorrente");
             return;
         }
         FcmGateway.Result result = gateway.send(event, device);

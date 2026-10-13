@@ -25,11 +25,13 @@ public interface NotificationRepository {
     void deactivateDevice(String userId, String installationId);
     void deactivateGeneration(Device device);
     Page<Notice> inbox(String userId, int limit, String cursor);
+    void clearInbox(String userId, String idempotencyKey, Instant now);
     Notice markRead(String userId, String id, Instant now);
     Page<Participant> participants(Event event, String cursor);
     Page<Device> devices(String userId, String cursor);
     boolean createNotice(String userId, Event event);
     boolean eligible(Device device);
+    boolean eligible(Device device, Event event);
     Progress acquireEvent(Event event, String owner, Instant now);
     void checkpoint(Event event, String owner, Progress progress);
     void releaseEvent(Event event, String owner);

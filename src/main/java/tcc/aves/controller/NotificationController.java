@@ -63,6 +63,13 @@ public class NotificationController {
         return new UnreadResponse(service.preferences(user.id()).unreadCount());
     }
 
+    @DeleteMapping("/notifications")
+    public ResponseEntity<Void> clear(@AuthenticationPrincipal AuthenticatedUser user,
+                                     @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
+        service.clear(user.id(), idempotencyKey);
+        return ResponseEntity.noContent().build();
+    }
+
     @PatchMapping("/notifications/{id}/read")
     public NotificationRepository.Notice read(@AuthenticationPrincipal AuthenticatedUser user, @PathVariable String id) {
         return service.read(user.id(), id);

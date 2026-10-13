@@ -29,6 +29,9 @@ import java.net.http.HttpResponse;
 import java.time.*;
 import java.util.*;
 import java.util.concurrent.Executors;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -266,6 +269,280 @@ class NotificationIntegrationTest extends AbstractDynamoDbLocalTest {
         assertEquals(400, http("PUT", "/api/notification-devices/install-1", alice, "{\"token\":\"bad\"}").statusCode());
         assertEquals(200, http("PUT", "/api/notification-preferences", alice, "{\"pushEnabled\":false}").statusCode());
         assertFalse(repository.preferences(alice.id()).pushEnabled());
+    }
+
+    @Test
+    void clearHttpIsAuthenticatedScopedIdempotentAndPreservesParticipationDevicesAndLedger() throws Exception {
+        assertEquals(401, http("DELETE", "/api/notifications", null, null, "clear-a").statusCode());
+        assertEquals(404, http("DELETE", "/api/notifications", alice, null, "clear-a").statusCode());
+        repository.subscribe(alice.id(), start);
+        repository.subscribe(bob.id(), start);
+        repository.registerDevice(alice.id(), "install-a", "synthetic-token-1234567890");
+        Device device = repository.devices(alice.id(), null).items().getFirst();
+        Event accepted = new Event("accepted-before-clear", start.plusSeconds(1));
+        new NotificationDispatcher(repository, (e, d) -> new FcmGateway.Result(
+                FcmGateway.Outcome.ACCEPTED, "synthetic-accepted", null, Duration.ZERO),
+                Clock.fixed(start.plusSeconds(2), ZoneOffset.UTC)).dispatch(accepted, () -> 60000);
+        for (int i = 0; i < 25; i++) {
+            repository.createNotice(alice.id(), new Event("old-" + i, start.plusSeconds(i + 2)));
+        }
+        repository.markRead(alice.id(), "old-0", start.plusSeconds(30));
+        var oldCursor = repository.inbox(alice.id(), 2, null).nextCursor();
+        repository.setPreference(alice.id(), false);
+        assertEquals(400, http("DELETE", "/api/notifications", alice, null).statusCode());
+        assertEquals(400, http("DELETE", "/api/notifications", alice, null, "invalid.key").statusCode());
+        assertEquals(204, http("DELETE", "/api/notifications", alice, null, "clear-a").statusCode());
+        assertTrue(repository.inbox(alice.id(), 20, null).items().isEmpty());
+        assertEquals(new Preferences(start, false, 0), repository.preferences(alice.id()));
+        assertEquals(device, repository.devices(alice.id(), null).items().getFirst());
+        assertEquals("ACCEPTED", repository.attempt(accepted, device).status());
+        assertEquals(1, repository.preferences(bob.id()).unreadCount());
+        assertEquals(400, http("GET", "/api/notifications?cursor=" + oldCursor, alice, null).statusCode());
+        assertEquals(404, http("PATCH", "/api/notifications/old-0/read", alice, null).statusCode());
+        assertFalse(repository.createNotice(alice.id(), accepted));
+        assertFalse(repository.createNotice(alice.id(), new Event("delayed", start.plusSeconds(100))));
+        Event fresh = new Event("fresh", Instant.now().plusSeconds(1));
+        assertTrue(repository.createNotice(alice.id(), fresh));
+        assertEquals(204, http("DELETE", "/api/notifications", alice, null, "clear-a").statusCode());
+        assertEquals(List.of("fresh"), repository.inbox(alice.id(), 20, null).items().stream().map(Notice::id).toList());
+        assertEquals(1, repository.preferences(alice.id()).unreadCount());
+        assertEquals(204, http("DELETE", "/api/notifications", alice, null, "clear-b").statusCode());
+        assertTrue(repository.inbox(alice.id(), 20, null).items().isEmpty());
+        assertFalse(repository.createNotice(alice.id(), fresh));
+        users.delete(alice.id());
+        assertEquals(401, http("DELETE", "/api/notifications", alice, null, "clear-b").statusCode());
+        assertThrows(tcc.aves.exception.ResourceNotFoundException.class,
+                () -> repository.clearInbox(alice.id(), "clear-b", Instant.now()));
+        assertTrue(getItem("notification-test-users", "USER#" + alice.id()).isEmpty());
+    }
+
+    @Test
+    void cutoffUsesEventCreationNanosecondsAndGenerationZeroLegacyRemainsReadable() {
+        repository.subscribe(alice.id(), start);
+        Event legacy = new Event("legacy", start.plusSeconds(1));
+        assertTrue(repository.createNotice(alice.id(), legacy));
+        var locatorKey = Map.of("pk", AttributeValue.builder().s("NOTIF#USER#" + alice.id()).build(),
+                "sk", AttributeValue.builder().s("NOTIFICATION#legacy").build());
+        dynamoDbClient.updateItem(r -> r.tableName("notification-test-sightings")
+                .key(locatorKey).updateExpression("REMOVE inboxGeneration"));
+        var inboxKey = getItem("notification-test-sightings", "NOTIF#USER#" + alice.id(), "NOTIFICATION#legacy").get("inboxKey");
+        dynamoDbClient.updateItem(r -> r.tableName("notification-test-sightings")
+                .key(Map.of("pk", locatorKey.get("pk"), "sk", inboxKey)).updateExpression("REMOVE inboxGeneration"));
+        assertEquals("legacy", repository.inbox(alice.id(), 1, null).items().getFirst().id());
+        assertNotNull(repository.markRead(alice.id(), "legacy", start.plusSeconds(2)).readAt());
+        Instant cutoff = start.plusSeconds(3).plusNanos(123456);
+        repository.clearInbox(alice.id(), "clear-nanos", cutoff);
+        assertFalse(repository.createNotice(alice.id(), new Event("before", cutoff.minusNanos(1))));
+        assertFalse(repository.createNotice(alice.id(), new Event("equal", cutoff)));
+        assertTrue(repository.createNotice(alice.id(), new Event("after", cutoff.plusNanos(1))));
+        assertEquals(cutoff.toEpochMilli(), cutoff.plusNanos(1).toEpochMilli());
+        assertEquals(1, repository.preferences(alice.id()).unreadCount());
+        assertThrows(tcc.aves.exception.ResourceNotFoundException.class,
+                () -> repository.markRead(alice.id(), "legacy", cutoff));
+        assertEquals(1, repository.preferences(alice.id()).unreadCount());
+    }
+
+    @Test
+    void concurrentClearReadCreateAndClearReplaysKeepActiveGenerationCounterExact() throws Exception {
+        repository.subscribe(alice.id(), start);
+        repository.createNotice(alice.id(), new Event("read-race", start.plusSeconds(1)));
+        Instant cutoff = start.plusSeconds(2);
+        try (var workers = Executors.newFixedThreadPool(3)) {
+            var operations = workers.invokeAll(List.<java.util.concurrent.Callable<Void>>of(
+                    () -> { repository.clearInbox(alice.id(), "race-clear", cutoff); return null; },
+                    () -> {
+                        try { repository.markRead(alice.id(), "read-race", cutoff); }
+                        catch (tcc.aves.exception.ResourceNotFoundException expected) { }
+                        return null;
+                    },
+                    () -> { repository.createNotice(alice.id(), new Event("old-race", cutoff.minusNanos(1))); return null; }));
+            for (var operation : operations) operation.get();
+            assertEquals(0, repository.preferences(alice.id()).unreadCount());
+            assertTrue(repository.inbox(alice.id(), 20, null).items().isEmpty());
+            var writes = workers.invokeAll(List.<java.util.concurrent.Callable<Void>>of(
+                    () -> { repository.clearInbox(alice.id(), "race-clear", cutoff.plusSeconds(100)); return null; },
+                    () -> { repository.clearInbox(alice.id(), "race-clear", cutoff.plusSeconds(100)); return null; },
+                    () -> { repository.createNotice(alice.id(), new Event("new-race", cutoff.plusNanos(1))); return null; }));
+            for (var write : writes) write.get();
+        }
+        assertEquals(1, repository.preferences(alice.id()).unreadCount());
+        assertEquals(List.of("new-race"), repository.inbox(alice.id(), 20, null).items().stream().map(Notice::id).toList());
+        repository.markRead(alice.id(), "new-race", cutoff.plusSeconds(1));
+        assertEquals(0, repository.preferences(alice.id()).unreadCount());
+    }
+
+    @Test
+    void concurrentSameClearTokenAdvancesOnceAndNewGenerationPaginatesWithoutLegacyRows() throws Exception {
+        repository.subscribe(alice.id(), start);
+        repository.subscribe(bob.id(), start);
+        try (var workers = Executors.newFixedThreadPool(2)) {
+            var clears = workers.invokeAll(List.<java.util.concurrent.Callable<Void>>of(
+                    () -> { repository.clearInbox(alice.id(), "same-clear", start.plusSeconds(1)); return null; },
+                    () -> { repository.clearInbox(alice.id(), "same-clear", start.plusSeconds(1)); return null; }));
+            for (var clear : clears) clear.get();
+        }
+        assertEquals("1", getItem("notification-test-sightings", "NOTIF#USER#" + alice.id(), "PROFILE").get("inboxGeneration").n());
+        for (int i = 0; i < 3; i++) repository.createNotice(alice.id(), new Event("generation1-" + i, start.plusSeconds(i + 2)));
+        var page = repository.inbox(alice.id(), 2, null);
+        assertEquals(List.of("generation1-2", "generation1-1"), page.items().stream().map(Notice::id).toList());
+        assertEquals(List.of("generation1-0"), repository.inbox(alice.id(), 2, page.nextCursor()).items().stream().map(Notice::id).toList());
+        assertThrows(IllegalArgumentException.class, () -> repository.inbox(bob.id(), 2, page.nextCursor()));
+    }
+
+    @Test
+    void clearedQueuedAndResumedEventsCannotPushButNewEventsAndOtherAccountsCan() {
+        repository.subscribe(alice.id(), start);
+        repository.subscribe(bob.id(), start);
+        repository.registerDevice(alice.id(), "install-a", "synthetic-token-alice-1234567890");
+        repository.registerDevice(bob.id(), "install-b", "synthetic-token-bob-1234567890");
+        Event queued = new Event("old-queued", start.plusSeconds(1));
+        Event existingFuture = new Event("old-generation-future-time", start.plusSeconds(10));
+        repository.createNotice(alice.id(), existingFuture);
+        repository.clearInbox(alice.id(), "clear-push", start.plusSeconds(2));
+        List<String> deliveries = new ArrayList<>();
+        FcmGateway gateway = (e, d) -> {
+            deliveries.add(e.sightingId() + ":" + d.userId());
+            return new FcmGateway.Result(FcmGateway.Outcome.ACCEPTED, "synthetic-message", null, Duration.ZERO);
+        };
+        var dispatcher = new NotificationDispatcher(repository, gateway, Clock.fixed(start.plusSeconds(20), ZoneOffset.UTC));
+        dispatcher.dispatch(queued, () -> 60000);
+        dispatcher.dispatch(existingFuture, () -> 60000);
+        Device aliceDevice = repository.devices(alice.id(), null).items().getFirst();
+        assertFalse(repository.claimAttempt(queued, aliceDevice, start.plusSeconds(20)));
+        assertFalse(repository.claimAttempt(existingFuture, aliceDevice, start.plusSeconds(20)));
+        assertTrue(repository.attempt(queued, aliceDevice).status().isEmpty());
+        Event fresh = new Event("new-after-clear", start.plusSeconds(3));
+        dispatcher.dispatch(fresh, () -> 60000);
+        assertEquals(List.of("old-queued:" + bob.id(), "old-generation-future-time:" + bob.id(),
+                "new-after-clear:" + alice.id(), "new-after-clear:" + bob.id()).stream().sorted().toList(),
+                deliveries.stream().sorted().toList());
+        assertEquals(1, repository.preferences(alice.id()).unreadCount());
+        assertEquals(3, repository.preferences(bob.id()).unreadCount());
+    }
+
+    @Test
+    void clearBetweenEligibilityAndAttemptReservationPreventsSendWithoutLosingNewEvents() {
+        repository.subscribe(alice.id(), start);
+        repository.registerDevice(alice.id(), "install-a", "synthetic-token-1234567890");
+        Event event = new Event("clear-before-claim", start.plusSeconds(1));
+        var interrupted = new NotificationRepositoryDynamoDbAdapter(dynamoDbClient, enhancedClient,
+                "notification-test-sightings", "notification-test-users") {
+            @Override public boolean claimAttempt(Event pending, Device device, Instant now) {
+                repository.clearInbox(device.userId(), "clear-before-claim", start.plusSeconds(2));
+                return super.claimAttempt(pending, device, now);
+            }
+        };
+        new NotificationDispatcher(interrupted, (e, d) -> { throw new AssertionError("Cleared event must not send"); },
+                Clock.fixed(start.plusSeconds(3), ZoneOffset.UTC)).dispatch(event, () -> 60000);
+        assertEquals(0, repository.preferences(alice.id()).unreadCount());
+        assertTrue(repository.createNotice(alice.id(), new Event("still-new", start.plusSeconds(4))));
+    }
+
+    @Test
+    void pendingRetryAfterClearKeepsLedgerButNeverReopensInboxOrSendsAgain() {
+        repository.subscribe(alice.id(), start);
+        repository.registerDevice(alice.id(), "install-a", "synthetic-token-1234567890");
+        Device device = repository.devices(alice.id(), null).items().getFirst();
+        Event event = new Event("clear-during-backoff", start.plusSeconds(1));
+        enqueue(event);
+        AtomicInteger sends = new AtomicInteger();
+        FcmGateway gateway = (e, d) -> {
+            sends.incrementAndGet();
+            return new FcmGateway.Result(FcmGateway.Outcome.RETRYABLE, null, "HTTP_429", Duration.ofSeconds(120));
+        };
+        assertEquals(new NotificationJobProcessor.Batch(0, 1, 0),
+                new NotificationJobProcessor(repository, gateway, Clock.fixed(event.createdAt(), ZoneOffset.UTC))
+                        .process(() -> 60000));
+        repository.clearInbox(alice.id(), "clear-backoff", start.plusSeconds(2));
+        assertEquals(new NotificationJobProcessor.Batch(1, 0, 0),
+                new NotificationJobProcessor(repository, gateway, Clock.fixed(start.plusSeconds(122), ZoneOffset.UTC))
+                        .process(() -> 60000));
+        assertEquals(1, sends.get());
+        assertEquals("WAITING", repository.attempt(event, device).status());
+        assertEquals(1, repository.attempt(event, device).count());
+        assertTrue(repository.inbox(alice.id(), 20, null).items().isEmpty());
+        assertEquals(0, repository.preferences(alice.id()).unreadCount());
+        assertTrue(repository.dueJobs(start.plusSeconds(123), 10).isEmpty());
+        assertFalse(repository.createNotice(alice.id(), event));
+    }
+
+    @Test
+    void transactionGenerationFenceReevaluatesCreateReadAndPushAfterConcurrentClear() throws Exception {
+        repository.subscribe(alice.id(), start);
+        repository.registerDevice(alice.id(), "install-a", "synthetic-token-1234567890");
+        Device device = repository.devices(alice.id(), null).items().getFirst();
+        try (var workers = Executors.newSingleThreadExecutor()) {
+            var creation = pausedTransactions();
+            Event fresh = new Event("create-fence", start.plusSeconds(3));
+            var creating = workers.submit(() -> creation.repository().createNotice(alice.id(), fresh));
+            assertTrue(creation.reached().await(10, TimeUnit.SECONDS));
+            try { repository.clearInbox(alice.id(), "create-fence-clear", start.plusSeconds(2)); }
+            finally { creation.resume().countDown(); }
+            assertTrue(creating.get(10, TimeUnit.SECONDS));
+            assertEquals(1, repository.preferences(alice.id()).unreadCount());
+            assertEquals("1", getItem("notification-test-sightings", "NOTIF#USER#" + alice.id(),
+                    "NOTIFICATION#create-fence").get("inboxGeneration").n());
+
+            var reading = pausedTransactions();
+            var read = workers.submit(() -> reading.repository().markRead(alice.id(), fresh.sightingId(), start.plusSeconds(4)));
+            assertTrue(reading.reached().await(10, TimeUnit.SECONDS));
+            try {
+                repository.clearInbox(alice.id(), "read-fence-clear", start.plusSeconds(4));
+                repository.createNotice(alice.id(), new Event("new-count", start.plusSeconds(5)));
+            } finally { reading.resume().countDown(); }
+            var readFailure = assertThrows(java.util.concurrent.ExecutionException.class,
+                    () -> read.get(10, TimeUnit.SECONDS));
+            assertInstanceOf(tcc.aves.exception.ResourceNotFoundException.class, readFailure.getCause());
+            assertEquals(1, repository.preferences(alice.id()).unreadCount());
+            assertNull(repository.inbox(alice.id(), 20, null).items().getFirst().readAt());
+
+            var push = pausedTransactions();
+            Event pending = new Event("new-count", start.plusSeconds(5));
+            var claim = workers.submit(() -> push.repository().claimAttempt(pending, device, start.plusSeconds(6)));
+            assertTrue(push.reached().await(10, TimeUnit.SECONDS));
+            try { repository.clearInbox(alice.id(), "push-fence-clear", start.plusSeconds(6)); }
+            finally { push.resume().countDown(); }
+            assertFalse(claim.get(10, TimeUnit.SECONDS));
+            assertEquals("", repository.attempt(pending, device).status());
+            assertEquals(0, repository.preferences(alice.id()).unreadCount());
+
+            repository.createNotice(alice.id(), new Event("before-account-deletion", start.plusSeconds(7)));
+            var deletion = pausedTransactions();
+            var clear = workers.submit(() -> {
+                deletion.repository().clearInbox(alice.id(), "deleted-clear", start.plusSeconds(8));
+                return null;
+            });
+            assertTrue(deletion.reached().await(10, TimeUnit.SECONDS));
+            try { users.delete(alice.id()); }
+            finally { deletion.resume().countDown(); }
+            var clearFailure = assertThrows(java.util.concurrent.ExecutionException.class,
+                    () -> clear.get(10, TimeUnit.SECONDS));
+            assertInstanceOf(tcc.aves.exception.ResourceNotFoundException.class, clearFailure.getCause());
+            assertEquals("3", getItem("notification-test-sightings", "NOTIF#USER#" + alice.id(),
+                    "PROFILE").get("inboxGeneration").n());
+            assertEquals(1, repository.preferences(alice.id()).unreadCount());
+            assertTrue(getItem("notification-test-users", "USER#" + alice.id()).isEmpty());
+        }
+    }
+
+    private record PausedTransactions(NotificationRepository repository, CountDownLatch reached, CountDownLatch resume) {}
+
+    private PausedTransactions pausedTransactions() {
+        CountDownLatch reached = new CountDownLatch(1);
+        CountDownLatch resume = new CountDownLatch(1);
+        AtomicBoolean first = new AtomicBoolean(true);
+        var client = (software.amazon.awssdk.services.dynamodb.DynamoDbClient) java.lang.reflect.Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[]{software.amazon.awssdk.services.dynamodb.DynamoDbClient.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("transactWriteItems") && first.getAndSet(false)) {
+                        reached.countDown();
+                        if (!resume.await(10, TimeUnit.SECONDS)) throw new AssertionError("Transaction was not resumed");
+                    }
+                    try { return method.invoke(dynamoDbClient, args); }
+                    catch (java.lang.reflect.InvocationTargetException e) { throw e.getCause(); }
+                });
+        return new PausedTransactions(new NotificationRepositoryDynamoDbAdapter(client, enhancedClient,
+                "notification-test-sightings", "notification-test-users"), reached, resume);
     }
 
     private HttpResponse<String> http(String method, String path, UserRecord user, String body) throws Exception {

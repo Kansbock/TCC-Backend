@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { generateKeyPairSync } from 'node:crypto';
-import { credentialJson, validateEnvironment, secretParameter, environmentForUpdate, apiImageUri, REPOSITORY, TAGS } from './deploy-api.mjs';
+import { credentialJson, validateEnvironment, secretParameter, environmentForUpdate, apiImageUri, maintenanceFlag, REPOSITORY, TAGS } from './deploy-api.mjs';
 
 const credential = credentialJson(JSON.stringify({
   type: 'service_account', project_id: 'avistai-tcc', client_email: 'synthetic@example.test',
@@ -48,6 +48,16 @@ test('both secrets preserve previous values except initial setup or explicit rot
   }
 });
 
+test('maintenance is explicit and an existing pause survives unrelated deployment', () => {
+  assert.equal(maintenanceFlag({}, false, false), 'false');
+  assert.equal(maintenanceFlag({}, true, false), 'true');
+  assert.equal(maintenanceFlag({ SIGHTINGS_WRITES_PAUSED: 'true' }, false, false), 'true');
+  assert.equal(maintenanceFlag({ SIGHTINGS_WRITES_PAUSED: 'true' }, false, true), 'false');
+  assert.throws(() => maintenanceFlag({}, true, true), /not both/);
+  assert.equal(environmentForUpdate({ SIGHTINGS_WRITES_PAUSED: 'true' }, options).SIGHTINGS_WRITES_PAUSED, 'true');
+  assert.throws(() => environmentForUpdate({}, { ...options, writesPaused: 'invalid' }), /maintenance flag/);
+});
+
 test('immutable API digest cannot select another repository or mutable tag', () => {
   assert.equal(apiImageUri(REPOSITORY, `sha256:${'a'.repeat(64)}`), `${REPOSITORY}@sha256:${'a'.repeat(64)}`);
   assert.throws(() => apiImageUri(REPOSITORY, 'latest'));
@@ -60,6 +70,7 @@ test('template keeps NoEcho secrets, disabled processing and only the existing A
     assert.match(template, new RegExp(`${key}:\\n    Type: String\\n    NoEcho: true`));
   }
   assert.match(template, /NotificationProcessingEnabled:[\s\S]*?Default: 'false'/);
+  assert.match(template, /SIGHTINGS_WRITES_PAUSED: !Ref SightingsWritesPaused/);
   assert.doesNotMatch(template, /AWS::IAM|AWS::DynamoDB|AWS::S3|EventSourceMapping|NotificationsTableName/);
   assert.doesNotMatch(template.split('Outputs:')[1], /FcmServiceAccountJson|JwtSecret/);
 });
@@ -130,6 +141,7 @@ process.stdout.write(JSON.stringify(responses[command] || {}));
       { ParameterKey: 'JwtSecret', UsePreviousValue: true });
     assert.equal(captured.request.Parameters.find(parameter => parameter.ParameterKey === 'FcmServiceAccountJson').ParameterValue, credential);
     assert.equal(captured.request.Parameters.find(parameter => parameter.ParameterKey === 'NotificationProcessingEnabled').ParameterValue, 'false');
+    assert.equal(captured.request.Parameters.find(parameter => parameter.ParameterKey === 'SightingsWritesPaused').ParameterValue, 'false');
     const calls = readFileSync(fixture.calls, 'utf8');
     assert.equal(calls.includes(options.jwt), false);
     assert.equal(calls.includes('BEGIN PRIVATE KEY'), false);

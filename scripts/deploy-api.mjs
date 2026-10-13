@@ -51,9 +51,9 @@ export function apiImageUri(repository, digest) {
   return `${repository}@${digest}`;
 }
 
-export function environmentForUpdate(current, { jwt, credential, runner, enabled }) {
+export function environmentForUpdate(current, { jwt, credential, runner, enabled, writesPaused = current.SIGHTINGS_WRITES_PAUSED || 'false' }) {
   const known = ['JWT_SECRET', 'FCM_SERVICE_ACCOUNT_JSON', 'FCM_PROJECT_ID',
-    'NOTIFICATION_RUNNER_USER_ID', 'NOTIFICATION_PROCESSING_ENABLED'];
+    'NOTIFICATION_RUNNER_USER_ID', 'NOTIFICATION_PROCESSING_ENABLED', 'SIGHTINGS_WRITES_PAUSED'];
   if (Object.keys(current).some(key => !known.includes(key))) {
     throw new Error('Unmanaged existing environment variables: incorporate them into the template before updating.');
   }
@@ -62,16 +62,24 @@ export function environmentForUpdate(current, { jwt, credential, runner, enabled
     throw new Error('Set NOTIFICATION_RUNNER_USER_ID to the existing service account UUID.');
   }
   if (!['true', 'false'].includes(enabled)) throw new Error('Processing flag must be true or false.');
+  if (!['true', 'false'].includes(writesPaused)) throw new Error('Sightings maintenance flag must be true or false.');
   return {
     JWT_SECRET: jwt, FCM_SERVICE_ACCOUNT_JSON: credential, FCM_PROJECT_ID: 'avistai-tcc',
     NOTIFICATION_RUNNER_USER_ID: runner, NOTIFICATION_PROCESSING_ENABLED: enabled,
+    SIGHTINGS_WRITES_PAUSED: writesPaused,
   };
+}
+
+export function maintenanceFlag(current, pause, resume) {
+  if (pause && resume) throw new Error('Choose --pause-sightings or --resume-sightings, not both.');
+  return pause ? 'true' : resume ? 'false' : current.SIGHTINGS_WRITES_PAUSED || 'false';
 }
 
 function main() {
   const flags = new Set(process.argv.slice(2));
   for (const flag of flags) {
-    if (!['--apply', '--create', '--rotate-key', '--rotate-jwt', '--enable-processing'].includes(flag)) {
+    if (!['--apply', '--create', '--rotate-key', '--rotate-jwt', '--enable-processing',
+      '--pause-sightings', '--resume-sightings'].includes(flag)) {
       throw new Error('Unknown deployment flag.');
     }
   }
@@ -141,7 +149,8 @@ function main() {
     : current.JWT_SECRET;
   const runner = process.env.NOTIFICATION_RUNNER_USER_ID || current.NOTIFICATION_RUNNER_USER_ID;
   const enabled = flags.has('--enable-processing') ? 'true' : 'false';
-  const variables = environmentForUpdate(current, { jwt, credential, runner, enabled });
+  const writesPaused = maintenanceFlag(current, flags.has('--pause-sightings'), flags.has('--resume-sightings'));
+  const variables = environmentForUpdate(current, { jwt, credential, runner, enabled, writesPaused });
   const bytes = validateEnvironment(variables);
   const templatePath = resolve(root, 'infra/aves-lambda.yaml');
   const template = readFileSync(templatePath, 'utf8');
@@ -152,7 +161,7 @@ function main() {
     if (apiImageUri(repositoryUri, digest) !== imageUri) throw new Error('Invalid API_IMAGE_URI.');
     aws(['ecr', 'describe-images', '--repository-name', 'aves-api', '--image-ids', `imageDigest=${digest}`]);
   }
-  console.log(`API preflight: account ${account}, ${bytes}/4096 bytes, processing=${enabled}. JWT/key content omitted.`);
+  console.log(`API preflight: account ${account}, ${bytes}/4096 bytes, processing=${enabled}, sightingsPaused=${writesPaused}. JWT/key content omitted.`);
   if (configuration) {
     const old = aws(['lambda', 'get-function', '--function-name', functionName]).Code.ResolvedImageUri;
     console.log(`Rollback API digest: ${old}`);
@@ -188,7 +197,7 @@ function main() {
       StackName: stack, ChangeSetName: changeSet, ChangeSetType: create ? 'CREATE' : 'UPDATE', TemplateBody: template,
       Parameters: [
         ...Object.entries({ ImageUri: imageUri, ExecutionRoleArn: role, FunctionName: functionName,
-          NotificationRunnerUserId: runner, NotificationProcessingEnabled: enabled })
+          NotificationRunnerUserId: runner, NotificationProcessingEnabled: enabled, SightingsWritesPaused: writesPaused })
           .map(([ParameterKey, ParameterValue]) => ({ ParameterKey, ParameterValue })),
         secretParameter('JwtSecret', { previous: !create, rotate: rotateJwt, value: jwt }),
         secretParameter('FcmServiceAccountJson', { previous: hadFcm, rotate: rotateFcm, value: credential }),

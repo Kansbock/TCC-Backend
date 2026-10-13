@@ -28,6 +28,100 @@ a primeira invocação, sem provocar o reinício da aplicação por timeout de
 inicialização. Isso não torna o cold start instantâneo nem aumenta os
 30 segundos disponíveis no API Gateway.
 
+## Agrupamento por minuto e migração histórica
+
+A API aceita uma foto por `POST /api/sightings` e retorna o avistamento ao
+qual ela foi associada. Mesmo conjunto de espécies (sem considerar ordem),
+dia e `HH:mm` usam a mesma combinação; segundos e milissegundos não participam
+da chave. Cada grupo tem até quatro fotos; a quinta abre outro UUID. Anexos
+não alteram referências/contadores nem geram outra outbox.
+
+Respostas acrescentam `imageUrls`; `imageUrl` continua sendo a primeira foto
+ou `null`. Registros sem a lista usam a foto legada. `PUT` com `imageUrls`
+substitui explicitamente a galeria, até quatro URLs distintas. Em galerias
+maiores, reenviar apenas a capa antiga preserva as outras fotos; alterar ou
+remover fotos usando só `imageUrl` retorna 409. Corrigir espécies/data/minuto
+para uma combinação ocupada retorna 409, sem mesclar. Contagens passam a
+representar grupos, não imagens.
+
+Reservas `SIGHTING_GROUP#v1#...`, membros e recibos ficam na tabela existente,
+sem atributos das GSIs. Não criar recursos ou concessões IAM. IDs absorvidos
+resolvem por `SIGHTING_ALIAS#...` em consultas/replay; edição/exclusão de um
+ID absorvido retorna 409 indicando o ID canônico. Fingerprints de requisições
+antigas mantêm os segundos originais. Cursores antigos são rejeitados;
+reiniciar a primeira página após migrar.
+
+**Publicação e migração exigem autorização operacional separada.** Não
+executar os exemplos contra AWS sem inventário, janela e manifesto aprovados.
+
+1. Pausar worker e executor de notificações. Publicar imagem compatível com
+   `./scripts/deploy-lambda.sh --apply --pause-sightings`, usando digest
+   imutável e parâmetros anteriores de JWT/FCM. Sem `--apply` continua somente
+   preparação. `SIGHTINGS_WRITES_PAUSED=true` faz POST/PUT/DELETE de
+   avistamentos retornarem 503 e mantém leituras. Esperar requisições/leases.
+2. Fazer backup restaurável e exportar snapshot paginado com perfil, região,
+   conta e tabelas explícitos. O export da ferramenta exclui dispositivos,
+   tokens e perfis de notificação; não substitui o backup completo.
+3. Gerar manifesto local (dry-run padrão), revisar grupos 4/4/restante, aliases,
+   contadores e anomalias. Eventos pendentes já iniciados bloqueiam aplicação
+   para decisão operacional; não apagar ledgers ou simular entrega.
+   Quando houver autorização explícita para encerrar todos os envios
+   históricos pendentes, usar `--pending-policy cancel-historical` no dry-run.
+   Essa política integra o hash aprovado: remove somente a fila dos registros
+   migrados, registra cancelamento no evento e mantém progresso, tentativas,
+   caixa e leitura. Não marca envios como entregues e não reenvia o passado.
+   Estado ausente ou lease ainda ativo continua bloqueando a operação.
+4. Aplicar somente o hash aprovado, ainda em manutenção. A ferramenta usa
+   transações pequenas, condições sobre before-images e journal local atômico
+   para retomar resposta/checkpoint perdido. Nenhuma operação move/apaga S3
+   nem modifica o SQLite ou caixas de usuário.
+5. Verificar dados da tabela base, referências e contadores; aguardar GSIs.
+   Publicar app, reiniciar cursores e liberar com `--resume-sightings`.
+   Um deploy sem nenhuma dessas flags preserva uma pausa existente.
+   Não habilitar processamento FCM implicitamente.
+
+```bash
+# Export remoto: executar apenas depois da autorização e da pausa.
+node scripts/migrate-sighting-groups.mjs --export --snapshot ./backup-grouping.json \
+  --profile '<perfil-autorizado>' --region us-east-1 --account '<conta>' \
+  --sightings-table aves-sightings --species-table aves-species
+
+# Dry-run local: não chama AWS.
+node scripts/migrate-sighting-groups.mjs --snapshot ./backup-grouping.json \
+  --manifest ./manifest-grouping.json
+
+# Alternativa somente com autorização para cancelar os envios históricos:
+# acrescentar --pending-policy cancel-historical ao dry-run acima.
+# Apply/rollback usam a política persistida no manifesto, sem essa flag.
+
+# Apply autorizado: mesmas opções de alvo utilizadas no export.
+node scripts/migrate-sighting-groups.mjs --apply --manifest ./manifest-grouping.json \
+  --journal ./journal-grouping.json --approve-sha '<hash-revisado>' --confirm-maintenance \
+  --profile '<perfil-autorizado>' --region us-east-1 --account '<conta>' \
+  --sightings-table aves-sightings --species-table aves-species
+```
+
+Snapshots/manifestos/journals são locais, com permissão 0600; guardá-los fora
+do Git, revisar referências e manter backup. Anomalia, versão divergente,
+permissão negada ou alvo/hash diferente interrompe explicitamente.
+Fotos iguais por URL não consomem vagas. Registros sem foto se associam ao
+primeiro grupo; uma combinação sem fotos mantém um grupo vazio.
+
+Para rollback sob pausa, usar o mesmo manifesto/journal e opções, substituindo
+`--apply` por `--rollback`. As before-images recompõem detalhes, referências,
+contagens e metadados. Não voltar apenas para a API de uma foto: ela não
+entende galerias/reservas nem gerações da caixa limpa. Após novas escritas,
+reconciliar antes de reverter. Limpezas de notificações confirmadas e ledgers
+não são apagados por esta ferramenta.
+
+```bash
+# Validação local, somente dados sintéticos / DynamoDB Local.
+node --test scripts/migrate-sighting-groups.test.mjs scripts/deploy-api.test.mjs
+JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64 ./gradlew test \
+  --tests 'tcc.aves.repository.dynamodb.SightingRepositoryDynamoDbAdapterTest' \
+  --tests 'tcc.aves.e2e.ApiEndToEndTest' --no-daemon
+```
+
 ## Pré-requisitos e tags
 
 AWS CLI v2 com perfil válido na conta `640168426886`, região `us-east-1`;

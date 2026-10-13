@@ -30,6 +30,10 @@ Parameters:
     Type: String
     Default: 'false'
     AllowedValues: ['true', 'false']
+  SightingsWritesPaused:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
 
 Resources:
   FunctionLogGroup:
@@ -65,6 +69,7 @@ Resources:
           FCM_PROJECT_ID: avistai-tcc
           NOTIFICATION_RUNNER_USER_ID: !Ref NotificationRunnerUserId
           NOTIFICATION_PROCESSING_ENABLED: !Ref NotificationProcessingEnabled
+          SIGHTINGS_WRITES_PAUSED: !Ref SightingsWritesPaused
       FunctionName: !Ref FunctionName
       MemorySize: 2048
       PackageType: Image
