@@ -39,8 +39,11 @@ public class SightingController {
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to,
             @RequestParam(required = false) String cursor,
-            @RequestParam(required = false) Integer limit) {
-        return ResponseEntity.ok(sightingService.query(speciesId, from, to, cursor, limit));
+            @RequestParam(required = false) Integer limit,
+            @RequestParam(required = false) Boolean includeUnidentified,
+            @RequestParam(required = false) String sort) {
+        return ResponseEntity.ok(sightingService.query(
+                speciesId, from, to, cursor, limit, Boolean.TRUE.equals(includeUnidentified), sort));
     }
 
     @GetMapping("/{id}")

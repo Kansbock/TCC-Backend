@@ -6,6 +6,22 @@ Não criar IAM, tabela, índice, Streams, bucket ou função de notificações.
 As tabelas `aves-users`, `aves-species` e `aves-sightings` continuam existentes;
 notificações usam partições reservadas na última.
 
+## Índice para ordenação de avistamentos
+
+A página mobile de avistamentos usa a GSI `primary-species-index` da tabela
+`aves-sightings` para ordenar globalmente pela primeira espécie do registro.
+O índice tem `primarySpeciesPk` como chave de partição e
+`primarySpeciesSk` como chave de ordenação; ambos os atributos são gravados
+em novos registros e em edições pela API.
+
+As tabelas e índices são externos a este repositório. Antes de publicar uma
+imagem com esse recurso, a operação responsável deve criar essa GSI com
+projeção `ALL`, aguardar o status `ACTIVE` e executar um backfill idempotente
+dos dois atributos nos avistamentos existentes. A Lambda não cria índice nem
+altera itens históricos automaticamente. Sem backfill, a ordenação cronológica
+continua disponível, mas a ordenação por espécie não mostrará registros
+legados.
+
 A imagem habilita `AWS_LWA_ASYNC_INIT=true`: se o Spring ultrapassar a janela
 inicial de 10 segundos, o Web Adapter continua verificando `/health` durante
 a primeira invocação, sem provocar o reinício da aplicação por timeout de

@@ -33,7 +33,9 @@ public class SightingItem {
     public static final String KEY_PREFIX = "SIGHTING#";
     public static final String DETAILS_SORT_KEY = "DETAILS";
     public static final String TIMELINE_INDEX_NAME = "timeline-index";
+    public static final String PRIMARY_SPECIES_INDEX_NAME = "primary-species-index";
     public static final String TIMELINE_PK_PREFIX = "SIGHTINGS#";
+    public static final String PRIMARY_SPECIES_PK = "SIGHTINGS#PRIMARY_SPECIES";
 
     private String pk;
     private String sk = DETAILS_SORT_KEY;
@@ -46,6 +48,8 @@ public class SightingItem {
     private Instant observedAt;
     private String timelinePk;
     private String timelineSk;
+    private String primarySpeciesPk;
+    private String primarySpeciesSk;
     private Instant createdAt;
     private Instant updatedAt;
     private Long version;
@@ -144,6 +148,24 @@ public class SightingItem {
 
     public void setTimelineSk(String timelineSk) {
         this.timelineSk = timelineSk;
+    }
+
+    @DynamoDbSecondaryPartitionKey(indexNames = PRIMARY_SPECIES_INDEX_NAME)
+    public String getPrimarySpeciesPk() {
+        return primarySpeciesPk;
+    }
+
+    public void setPrimarySpeciesPk(String primarySpeciesPk) {
+        this.primarySpeciesPk = primarySpeciesPk;
+    }
+
+    @DynamoDbSecondarySortKey(indexNames = PRIMARY_SPECIES_INDEX_NAME)
+    public String getPrimarySpeciesSk() {
+        return primarySpeciesSk;
+    }
+
+    public void setPrimarySpeciesSk(String primarySpeciesSk) {
+        this.primarySpeciesSk = primarySpeciesSk;
     }
 
     public Instant getCreatedAt() {

@@ -12,6 +12,7 @@ import tcc.aves.repository.SightingPage;
 import tcc.aves.repository.SightingQuery;
 import tcc.aves.repository.SightingRecord;
 import tcc.aves.repository.SightingRepository;
+import tcc.aves.repository.SightingSort;
 import tcc.aves.repository.SpeciesRecord;
 import tcc.aves.repository.SpeciesRepository;
 
@@ -104,6 +105,41 @@ class SightingServiceTest {
         sightingService.query(null, null, null, null, null);
 
         verify(sightingRepository).query(new SightingQuery(null, null, null, null, properties.defaultPageSize()));
+    }
+
+    @Test
+    void queryAcceptsTheRequestedSortAndHidesOutrosByDefault() {
+        SightingRecord identified = sightingRecord("sig-identified", List.of("sp-arara"), LocalDate.of(2026, 9, 10), LocalTime.NOON);
+        SightingRecord unidentified = sightingRecord("sig-other", List.of("sp-other"), LocalDate.of(2026, 9, 9), LocalTime.NOON);
+        when(sightingRepository.query(any())).thenReturn(new SightingPage(List.of(identified, unidentified), null, false));
+        when(speciesRepository.findAll()).thenReturn(List.of(
+                speciesRecord("sp-other", "Ave não identificada", "Avis incognita")));
+        when(speciesRepository.findAllByIds(any())).thenReturn(speciesMap(
+                speciesRecord("sp-arara", "Arara", "Ara ararauna"),
+                speciesRecord("sp-other", "Outros", "Avis incognita")));
+
+        CursorPage<SightingResponse> page = sightingService.query(
+                null, null, null, null, 3, false, "species_asc");
+
+        assertEquals(List.of("sig-identified"), page.items().stream().map(SightingResponse::id).toList());
+        verify(sightingRepository).query(
+                new SightingQuery(null, null, null, null, 3, SightingSort.SPECIES_ASC));
+    }
+
+    @Test
+    void queryIncludesOutrosWhenRequestedAndRejectsUnknownSort() {
+        SightingRecord unidentified = sightingRecord("sig-other", List.of("sp-other"), LocalDate.of(2026, 9, 9), LocalTime.NOON);
+        when(sightingRepository.query(any())).thenReturn(new SightingPage(List.of(unidentified), null, false));
+        when(speciesRepository.findAllByIds(any())).thenReturn(speciesMap(
+                speciesRecord("sp-other", "Outros", "Avis incognita")));
+
+        CursorPage<SightingResponse> page = sightingService.query(
+                null, null, null, null, 3, true, "newest");
+        assertEquals(List.of("sig-other"), page.items().stream().map(SightingResponse::id).toList());
+
+        IllegalArgumentException exception = assertThrows(IllegalArgumentException.class,
+                () -> sightingService.query(null, null, null, null, 3, false, "invalid"));
+        assertEquals("Ordenação de avistamentos inválida", exception.getMessage());
     }
 
     @Test

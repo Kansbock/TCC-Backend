@@ -10,6 +10,7 @@ import tcc.aves.exception.ResourceNotFoundException;
 import tcc.aves.repository.SightingPage;
 import tcc.aves.repository.SightingQuery;
 import tcc.aves.repository.SightingRecord;
+import tcc.aves.repository.SightingSort;
 import tcc.aves.repository.SpeciesRecord;
 import tcc.aves.repository.dynamodb.model.SightingIdempotencyItem;
 import tcc.aves.repository.dynamodb.model.SightingItem;
@@ -246,6 +247,32 @@ class SightingRepositoryDynamoDbAdapterTest extends AbstractDynamoDbLocalTest {
 
         SightingPage august31Only = sightingRepository.query(new SightingQuery(arara.id(), LocalDate.of(2026, 8, 31), LocalDate.of(2026, 8, 31), null, 10));
         assertEquals(List.of(augustHalfSecond.id(), augustWholeSecond.id()), august31Only.items().stream().map(SightingRecord::id).toList());
+    }
+
+    @Test
+    void queryOrdersByFirstSpeciesAndOldestChronologically() {
+        SpeciesRecord arara = speciesRepository.create("Arara", "Ara ararauna", "Desc", "Tips", "https://img/a");
+        SpeciesRecord beija = speciesRepository.create("Beija-flor", "Heliomaster squamosus", "Desc", "Tips", "https://img/b");
+        SpeciesRecord tucano = speciesRepository.create("Tucano", "Ramphastos toco", "Desc", "Tips", "https://img/t");
+
+        SightingRecord newest = sightingRepository.create(List.of(tucano.id()), LocalDate.of(2026, 9, 3), LocalTime.NOON, "https://s/1");
+        SightingRecord middle = sightingRepository.create(List.of(arara.id(), tucano.id()), LocalDate.of(2026, 9, 2), LocalTime.NOON, "https://s/2");
+        SightingRecord oldest = sightingRepository.create(List.of(beija.id()), LocalDate.of(2026, 9, 1), LocalTime.NOON, "https://s/3");
+
+        SightingPage speciesAscending = sightingRepository.query(
+                new SightingQuery(null, null, null, null, 10, SightingSort.SPECIES_ASC));
+        assertEquals(List.of(middle.id(), oldest.id(), newest.id()),
+                speciesAscending.items().stream().map(SightingRecord::id).toList());
+
+        SightingPage speciesDescending = sightingRepository.query(
+                new SightingQuery(null, null, null, null, 10, SightingSort.SPECIES_DESC));
+        assertEquals(List.of(newest.id(), oldest.id(), middle.id()),
+                speciesDescending.items().stream().map(SightingRecord::id).toList());
+
+        SightingPage chronologicalAscending = sightingRepository.query(
+                new SightingQuery(null, null, null, null, 10, SightingSort.OLDEST));
+        assertEquals(List.of(oldest.id(), middle.id(), newest.id()),
+                chronologicalAscending.items().stream().map(SightingRecord::id).toList());
     }
 
     private Callable<SightingRecord> updateCall(SightingRepositoryDynamoDbAdapter repository,

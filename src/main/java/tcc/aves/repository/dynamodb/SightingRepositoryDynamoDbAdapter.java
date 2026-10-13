@@ -1,5 +1,7 @@
 package tcc.aves.repository.dynamodb;
 
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Repository;
 import software.amazon.awssdk.enhanced.dynamodb.DynamoDbEnhancedClient;
 import software.amazon.awssdk.enhanced.dynamodb.DynamoDbIndex;
@@ -42,6 +44,7 @@ import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.YearMonth;
 import java.time.ZoneOffset;
+import java.text.Normalizer;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HexFormat;
@@ -52,6 +55,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.Locale;
 import java.util.UUID;
 
 /**
@@ -79,11 +83,35 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
     private final DynamoDbTable<SightingItem> sightingTable;
     private final DynamoDbTable<SpeciesSightingRefItem> refTable;
     private final DynamoDbIndex<SightingItem> timelineIndex;
+    private final DynamoDbIndex<SightingItem> primarySpeciesIndex;
     private final DynamoDbTable<SpeciesItem> speciesTable;
     private final DynamoDbTable<SightingIdempotencyItem> idempotencyTable;
     private final DynamoDbTable<NotificationJobItem> notificationJobs;
     private final SightingProperties properties;
     private final SightingCursorCodec cursorCodec;
+
+    @Autowired
+    public SightingRepositoryDynamoDbAdapter(
+            DynamoDbEnhancedClient enhancedClient,
+            DynamoDbTable<SightingItem> sightingTable,
+            DynamoDbTable<SpeciesSightingRefItem> refTable,
+            @Qualifier("sightingTimelineIndex") DynamoDbIndex<SightingItem> timelineIndex,
+            @Qualifier("sightingPrimarySpeciesIndex") DynamoDbIndex<SightingItem> primarySpeciesIndex,
+            DynamoDbTable<SpeciesItem> speciesTable,
+            DynamoDbTable<SightingIdempotencyItem> idempotencyTable,
+            SightingProperties properties,
+            SightingCursorCodec cursorCodec) {
+        this.enhancedClient = enhancedClient;
+        this.sightingTable = sightingTable;
+        this.refTable = refTable;
+        this.timelineIndex = timelineIndex;
+        this.primarySpeciesIndex = primarySpeciesIndex;
+        this.speciesTable = speciesTable;
+        this.idempotencyTable = idempotencyTable;
+        this.notificationJobs = enhancedClient.table(sightingTable.tableName(), TableSchema.fromBean(NotificationJobItem.class));
+        this.properties = properties;
+        this.cursorCodec = cursorCodec;
+    }
 
     public SightingRepositoryDynamoDbAdapter(
             DynamoDbEnhancedClient enhancedClient,
@@ -94,15 +122,9 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
             DynamoDbTable<SightingIdempotencyItem> idempotencyTable,
             SightingProperties properties,
             SightingCursorCodec cursorCodec) {
-        this.enhancedClient = enhancedClient;
-        this.sightingTable = sightingTable;
-        this.refTable = refTable;
-        this.timelineIndex = timelineIndex;
-        this.speciesTable = speciesTable;
-        this.idempotencyTable = idempotencyTable;
-        this.notificationJobs = enhancedClient.table(sightingTable.tableName(), TableSchema.fromBean(NotificationJobItem.class));
-        this.properties = properties;
-        this.cursorCodec = cursorCodec;
+        this(enhancedClient, sightingTable, refTable, timelineIndex,
+                sightingTable.index(SightingItem.PRIMARY_SPECIES_INDEX_NAME),
+                speciesTable, idempotencyTable, properties, cursorCodec);
     }
 
     @Override
@@ -125,6 +147,8 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
         sighting.setObservedAt(observedAt);
         sighting.setTimelinePk(SightingItem.TIMELINE_PK_PREFIX + YearMonth.from(date));
         sighting.setTimelineSk(TimeKeys.sortable(observedAt) + "#" + id);
+        sighting.setPrimarySpeciesPk(SightingItem.PRIMARY_SPECIES_PK);
+        sighting.setPrimarySpeciesSk(primarySpeciesSortKey(species.get(speciesIds.get(0)).getCommonName(), observedAt, id));
         sighting.setCreatedAt(now);
         sighting.setUpdatedAt(now);
 
@@ -175,6 +199,8 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
         sighting.setObservedAt(observedAt);
         sighting.setTimelinePk(SightingItem.TIMELINE_PK_PREFIX + YearMonth.from(date));
         sighting.setTimelineSk(TimeKeys.sortable(observedAt) + "#" + id);
+        sighting.setPrimarySpeciesPk(SightingItem.PRIMARY_SPECIES_PK);
+        sighting.setPrimarySpeciesSk(primarySpeciesSortKey(species.get(speciesIds.get(0)).getCommonName(), observedAt, id));
         sighting.setCreatedAt(now);
         sighting.setUpdatedAt(now);
 
@@ -282,6 +308,9 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
         current.setObservedAt(newObservedAt);
         current.setTimelinePk(SightingItem.TIMELINE_PK_PREFIX + YearMonth.from(date));
         current.setTimelineSk(TimeKeys.sortable(newObservedAt) + "#" + id);
+        current.setPrimarySpeciesPk(SightingItem.PRIMARY_SPECIES_PK);
+        current.setPrimarySpeciesSk(primarySpeciesSortKey(
+                touchedSpecies.get(newIds.iterator().next()).getCommonName(), newObservedAt, id));
         current.setUpdatedAt(now);
 
         TransactWriteItemsEnhancedRequest.Builder tx = TransactWriteItemsEnhancedRequest.builder()
@@ -352,6 +381,9 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
         if (query.speciesId() != null) {
             return queryBySpecies(query, limit);
         }
+        if (!query.sort().chronological()) {
+            return queryByPrimarySpecies(query, limit);
+        }
         return queryByTimeline(query, limit);
     }
 
@@ -363,7 +395,7 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
 
         QueryEnhancedRequest.Builder builder = QueryEnhancedRequest.builder()
                 .queryConditional(condition)
-                .scanIndexForward(false)
+                .scanIndexForward(query.sort().ascending())
                 .limit(limit);
 
         Map<String, AttributeValue> exclusiveStart = cursorCodec.decodeSimpleKey(query.cursor());
@@ -381,6 +413,33 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
         return new SightingPage(records, nextCursor, hasMore);
     }
 
+    private SightingPage queryByPrimarySpecies(SightingQuery query, int limit) {
+        QueryEnhancedRequest.Builder builder = QueryEnhancedRequest.builder()
+                .queryConditional(QueryConditional.keyEqualTo(
+                        Key.builder().partitionValue(SightingItem.PRIMARY_SPECIES_PK).build()))
+                .scanIndexForward(query.sort().ascending())
+                .limit(limit);
+
+        if (query.from() != null) {
+            builder.filterExpression(Expression.builder()
+                    .expression("#date BETWEEN :from AND :to")
+                    .putExpressionName("#date", "date")
+                    .putExpressionValue(":from", AttributeValue.builder().s(query.from().toString()).build())
+                    .putExpressionValue(":to", AttributeValue.builder().s(query.to().toString()).build())
+                    .build());
+        }
+
+        Map<String, AttributeValue> exclusiveStart = cursorCodec.decodeSimpleKey(query.cursor());
+        if (exclusiveStart != null) {
+            builder.exclusiveStartKey(exclusiveStart);
+        }
+
+        Page<SightingItem> page = primarySpeciesIndex.query(builder.build()).iterator().next();
+        boolean hasMore = page.lastEvaluatedKey() != null && !page.lastEvaluatedKey().isEmpty();
+        String nextCursor = hasMore ? cursorCodec.encodeSimpleKey(page.lastEvaluatedKey()) : null;
+        return new SightingPage(page.items().stream().map(this::toRecord).toList(), nextCursor, hasMore);
+    }
+
     private QueryConditional dayRangeConditional(String pk, LocalDate from, LocalDate to) {
         if (from != null && to != null) {
             return QueryConditional.sortBetween(
@@ -390,7 +449,7 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
         return QueryConditional.keyEqualTo(Key.builder().partitionValue(pk).build());
     }
 
-    // ---- consulta sem filtro de espécie: GSI de timeline, andando bucket a bucket ----
+    // ---- consulta cronológica sem filtro de espécie: GSI de timeline por mês ----
 
     private SightingPage queryByTimeline(SightingQuery query, int limit) {
         SightingCursorCodec.TimelineCursorState state = cursorCodec.decodeTimelineCursor(query.cursor());
@@ -398,21 +457,25 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
         String lowerBucket = query.from() != null
                 ? YearMonth.from(query.from()).toString()
                 : YearMonth.now(ZoneOffset.UTC).minusMonths(properties.maxLookbackMonths()).toString();
+        String upperBucket = query.to() != null
+                ? YearMonth.from(query.to()).toString()
+                : YearMonth.now(ZoneOffset.UTC).toString();
+        boolean ascending = query.sort().ascending();
 
-        String bucket = state != null ? state.monthBucket()
-                : (query.to() != null ? YearMonth.from(query.to()).toString() : YearMonth.now(ZoneOffset.UTC).toString());
+        String bucket = state != null ? state.monthBucket() : (ascending ? lowerBucket : upperBucket);
         Map<String, AttributeValue> exclusiveStart = state != null ? state.lastEvaluatedKey() : null;
 
         List<SightingItem> collected = new ArrayList<>();
         boolean reachedLowerBoundEnd = false;
 
         while (collected.size() < limit) {
-            if (bucket.compareTo(lowerBucket) < 0) {
+            if (ascending ? bucket.compareTo(upperBucket) > 0 : bucket.compareTo(lowerBucket) < 0) {
                 reachedLowerBoundEnd = true;
                 break;
             }
 
-            Page<SightingItem> page = queryTimelineBucket(bucket, exclusiveStart, limit - collected.size(), query);
+            Page<SightingItem> page = queryTimelineBucket(
+                    bucket, exclusiveStart, limit - collected.size(), query, ascending);
             collected.addAll(page.items());
 
             Map<String, AttributeValue> lastEvaluatedKey = page.lastEvaluatedKey();
@@ -420,7 +483,7 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
                 exclusiveStart = lastEvaluatedKey;
                 break;
             }
-            bucket = YearMonth.parse(bucket).minusMonths(1).toString();
+            bucket = (ascending ? YearMonth.parse(bucket).plusMonths(1) : YearMonth.parse(bucket).minusMonths(1)).toString();
             exclusiveStart = null;
         }
 
@@ -433,7 +496,7 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
             hasMore = true;
             nextCursor = cursorCodec.encodeTimelineCursor(bucket, exclusiveStart);
         } else {
-            hasMore = bucket.compareTo(lowerBucket) >= 0;
+            hasMore = ascending ? bucket.compareTo(upperBucket) <= 0 : bucket.compareTo(lowerBucket) >= 0;
             nextCursor = hasMore ? cursorCodec.encodeTimelineCursor(bucket, null) : null;
         }
 
@@ -442,7 +505,7 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
     }
 
     private Page<SightingItem> queryTimelineBucket(String bucket, Map<String, AttributeValue> exclusiveStart,
-                                                     int limitForThisCall, SightingQuery query) {
+                                                     int limitForThisCall, SightingQuery query, boolean ascending) {
         String timelinePk = SightingItem.TIMELINE_PK_PREFIX + bucket;
 
         String lowerSk = (query.from() != null && bucket.equals(YearMonth.from(query.from()).toString()))
@@ -467,13 +530,24 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
 
         QueryEnhancedRequest.Builder builder = QueryEnhancedRequest.builder()
                 .queryConditional(condition)
-                .scanIndexForward(false)
+                .scanIndexForward(ascending)
                 .limit(limitForThisCall);
         if (exclusiveStart != null) {
             builder.exclusiveStartKey(exclusiveStart);
         }
 
         return timelineIndex.query(builder.build()).iterator().next();
+    }
+
+    private String primarySpeciesSortKey(String name, Instant observedAt, String id) {
+        return normalizeSpeciesName(name) + "#" + TimeKeys.sortable(observedAt) + "#" + id;
+    }
+
+    private String normalizeSpeciesName(String value) {
+        return Normalizer.normalize(value == null ? "" : value, Normalizer.Form.NFD)
+                .replaceAll("\\p{M}", "")
+                .trim()
+                .toLowerCase(Locale.ROOT);
     }
 
     // ---- helpers compartilhados ----

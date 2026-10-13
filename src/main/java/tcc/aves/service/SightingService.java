@@ -11,17 +11,24 @@ import tcc.aves.repository.SightingPage;
 import tcc.aves.repository.SightingQuery;
 import tcc.aves.repository.SightingRecord;
 import tcc.aves.repository.SightingRepository;
+import tcc.aves.repository.SightingSort;
 import tcc.aves.repository.SpeciesRecord;
 import tcc.aves.repository.SpeciesRepository;
 
 import java.time.LocalDate;
+import java.text.Normalizer;
+import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.Locale;
 
 @Service
 public class SightingService {
+
+    private static final Set<String> UNIDENTIFIED_SPECIES_NAMES = Set.of(
+            "outros", "ave nao identificada", "especie nao identificada");
 
     private final SightingRepository sightingRepository;
     private final SpeciesRepository speciesRepository;
@@ -80,13 +87,58 @@ public class SightingService {
      * {@code from}/{@code to} devem ser enviados juntos e com {@code from <= to}.
      */
     public CursorPage<SightingResponse> query(String speciesId, LocalDate from, LocalDate to,
-                                              String cursor, Integer limit) {
+                                              String cursor, Integer limit,
+                                              boolean includeUnidentified, String sortParameter) {
         validateDateRange(from, to);
         int effectiveLimit = resolveLimit(limit);
+        SightingSort sort = SightingSort.fromRequest(sortParameter);
 
-        SightingPage page = sightingRepository.query(new SightingQuery(speciesId, from, to, cursor, effectiveLimit));
+        // Selecting a specific species always takes precedence over the
+        // checkbox. Otherwise, records classified as the special "Outros"
+        // species stay hidden unless the user explicitly includes them.
+        Set<String> unidentifiedSpeciesIds = speciesId == null && !includeUnidentified
+                ? findUnidentifiedSpeciesIds()
+                : null;
 
-        return new CursorPage<>(hydrate(page.items()), page.nextCursor(), page.hasMore());
+        List<SightingResponse> items = new ArrayList<>(effectiveLimit);
+        String nextCursor = cursor;
+        boolean hasMore;
+        do {
+            int remaining = effectiveLimit - items.size();
+            SightingPage page = sightingRepository.query(
+                    new SightingQuery(speciesId, from, to, nextCursor, remaining, sort));
+            List<SightingResponse> hydrated = hydrate(page.items());
+            if (unidentifiedSpeciesIds != null && !unidentifiedSpeciesIds.isEmpty()) {
+                hydrated = hydrated.stream()
+                        .filter(item -> item.species().stream()
+                                .noneMatch(species -> unidentifiedSpeciesIds.contains(species.id())))
+                        .toList();
+            }
+            items.addAll(hydrated);
+            nextCursor = page.nextCursor();
+            hasMore = page.hasMore();
+        } while (items.size() < effectiveLimit && hasMore);
+
+        return new CursorPage<>(List.copyOf(items), nextCursor, hasMore);
+    }
+
+    public CursorPage<SightingResponse> query(String speciesId, LocalDate from, LocalDate to,
+                                              String cursor, Integer limit) {
+        return query(speciesId, from, to, cursor, limit, false, null);
+    }
+
+    private Set<String> findUnidentifiedSpeciesIds() {
+        return speciesRepository.findAll().stream()
+                .filter(species -> UNIDENTIFIED_SPECIES_NAMES.contains(normalizeSpeciesName(species.name())))
+                .map(SpeciesRecord::id)
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+    }
+
+    private String normalizeSpeciesName(String value) {
+        return Normalizer.normalize(value == null ? "" : value, Normalizer.Form.NFD)
+                .replaceAll("\\p{M}", "")
+                .trim()
+                .toLowerCase(Locale.ROOT);
     }
 
     private void validateSpeciesIds(List<String> speciesIds) {

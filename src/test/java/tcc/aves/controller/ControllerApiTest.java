@@ -165,7 +165,7 @@ class ControllerApiTest {
 
     @Test
     void serviceUnavailableReturnsServiceUnavailableApiError() throws Exception {
-        when(sightingService.query(null, null, null, null, null))
+        when(sightingService.query(null, null, null, null, null, false, null))
                 .thenThrow(new ServiceUnavailableException("Dynamo down"));
 
         mockMvc.perform(get("/api/sightings")

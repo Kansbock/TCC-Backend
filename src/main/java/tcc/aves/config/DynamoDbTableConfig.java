@@ -62,6 +62,11 @@ public class DynamoDbTableConfig {
     }
 
     @Bean
+    public DynamoDbIndex<SightingItem> sightingPrimarySpeciesIndex(DynamoDbTable<SightingItem> sightingTable) {
+        return sightingTable.index(SightingItem.PRIMARY_SPECIES_INDEX_NAME);
+    }
+
+    @Bean
     public DynamoDbTable<SightingIdempotencyItem> sightingIdempotencyTable(
             DynamoDbEnhancedClient client, DynamoDbProperties properties) {
         return client.table(properties.sightingsTable(), TableSchema.fromBean(SightingIdempotencyItem.class));

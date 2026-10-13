@@ -147,7 +147,9 @@ public abstract class AbstractDynamoDbLocalTest {
                         AttributeDefinition.builder().attributeName("pk").attributeType(ScalarAttributeType.S).build(),
                         AttributeDefinition.builder().attributeName("sk").attributeType(ScalarAttributeType.S).build(),
                         AttributeDefinition.builder().attributeName("timelinePk").attributeType(ScalarAttributeType.S).build(),
-                        AttributeDefinition.builder().attributeName("timelineSk").attributeType(ScalarAttributeType.S).build())
+                        AttributeDefinition.builder().attributeName("timelineSk").attributeType(ScalarAttributeType.S).build(),
+                        AttributeDefinition.builder().attributeName("primarySpeciesPk").attributeType(ScalarAttributeType.S).build(),
+                        AttributeDefinition.builder().attributeName("primarySpeciesSk").attributeType(ScalarAttributeType.S).build())
                 .keySchema(
                         KeySchemaElement.builder().attributeName("pk").keyType(KeyType.HASH).build(),
                         KeySchemaElement.builder().attributeName("sk").keyType(KeyType.RANGE).build())
@@ -156,6 +158,13 @@ public abstract class AbstractDynamoDbLocalTest {
                         .keySchema(
                                 KeySchemaElement.builder().attributeName("timelinePk").keyType(KeyType.HASH).build(),
                                 KeySchemaElement.builder().attributeName("timelineSk").keyType(KeyType.RANGE).build())
+                        .projection(Projection.builder().projectionType(ProjectionType.ALL).build())
+                        .build(),
+                    GlobalSecondaryIndex.builder()
+                        .indexName(SightingItem.PRIMARY_SPECIES_INDEX_NAME)
+                        .keySchema(
+                                KeySchemaElement.builder().attributeName("primarySpeciesPk").keyType(KeyType.HASH).build(),
+                                KeySchemaElement.builder().attributeName("primarySpeciesSk").keyType(KeyType.RANGE).build())
                         .projection(Projection.builder().projectionType(ProjectionType.ALL).build())
                         .build())
                 .build());
