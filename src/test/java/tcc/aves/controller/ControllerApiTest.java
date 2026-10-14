@@ -21,6 +21,7 @@ import tcc.aves.exception.ServiceUnavailableException;
 import tcc.aves.repository.UserRecord;
 import tcc.aves.repository.UserRepository;
 import tcc.aves.security.JwtUtil;
+import tcc.aves.security.UserRole;
 import tcc.aves.service.SightingService;
 import tcc.aves.service.SpeciesService;
 import tcc.aves.service.UserService;
@@ -43,7 +44,9 @@ class ControllerApiTest {
 
     private static final String SELF_ID = "user-self";
     private static final String OTHER_ID = "user-other";
+    private static final String ADMIN_ID = "user-admin";
     private static final String EMAIL = "self@example.com";
+    private static final String ADMIN_EMAIL = "admin@example.com";
 
     @Autowired
     private WebApplicationContext webApplicationContext;
@@ -73,6 +76,7 @@ class ControllerApiTest {
         reset(userService, speciesService, sightingService, userRepository);
         when(userRepository.findById(SELF_ID)).thenReturn(Optional.of(userRecord(SELF_ID, EMAIL)));
         when(userRepository.findById(OTHER_ID)).thenReturn(Optional.of(userRecord(OTHER_ID, "other@example.com")));
+        when(userRepository.findById(ADMIN_ID)).thenReturn(Optional.of(adminRecord(ADMIN_ID, ADMIN_EMAIL)));
     }
 
     @Test
@@ -265,6 +269,19 @@ class ControllerApiTest {
                 .andExpect(jsonPath("$.message").value("Idempotency-Key já foi usada com uma requisição diferente"));
     }
 
+    @Test
+    void onlyAdministratorsCanDeleteSightings() throws Exception {
+        mockMvc.perform(delete("/api/sightings/{id}", "sig-1")
+                        .header("Authorization", bearer(SELF_ID, EMAIL)))
+                .andExpect(status().isForbidden());
+        verify(sightingService, never()).delete(anyString());
+
+        mockMvc.perform(delete("/api/sightings/{id}", "sig-1")
+                        .header("Authorization", bearer(ADMIN_ID, ADMIN_EMAIL)))
+                .andExpect(status().isNoContent());
+        verify(sightingService).delete("sig-1");
+    }
+
     private static SightingResponse sightingResponse() {
         Instant now = Instant.parse("2026-09-10T12:30:00Z");
         return new SightingResponse(
@@ -303,7 +320,7 @@ class ControllerApiTest {
             mockMvc.perform(put("/api/sightings/sig-1").header("Authorization", bearer(SELF_ID, EMAIL))
                             .contentType(MediaType.APPLICATION_JSON).content(body))
                     .andExpect(status().isServiceUnavailable());
-            mockMvc.perform(delete("/api/sightings/sig-1").header("Authorization", bearer(SELF_ID, EMAIL)))
+            mockMvc.perform(delete("/api/sightings/sig-1").header("Authorization", bearer(ADMIN_ID, ADMIN_EMAIL)))
                     .andExpect(status().isServiceUnavailable());
             verifyNoInteractions(sightingService);
             Instant now = Instant.parse("2026-09-10T10:15:00Z");
@@ -323,6 +340,11 @@ class ControllerApiTest {
     private static UserRecord userRecord(String id, String email) {
         Instant now = Instant.parse("2026-09-10T12:30:00Z");
         return new UserRecord(id, "User " + id, email, "hash", now, now);
+    }
+
+    private static UserRecord adminRecord(String id, String email) {
+        Instant now = Instant.parse("2026-09-10T12:30:00Z");
+        return new UserRecord(id, "Admin " + id, email, "hash", now, now, UserRole.ADMIN);
     }
 
     private static SpeciesResponse speciesResponse(String id, String name, String scientificName) {

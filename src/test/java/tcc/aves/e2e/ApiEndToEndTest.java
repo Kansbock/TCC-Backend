@@ -10,6 +10,8 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.TestPropertySource;
 import org.testcontainers.junit.jupiter.Testcontainers;
+import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
+import tcc.aves.repository.dynamodb.model.UserItem;
 import tcc.aves.security.JwtUtil;
 import tcc.aves.support.AbstractDynamoDbLocalTest;
 import tools.jackson.databind.JsonNode;
@@ -230,6 +232,8 @@ class ApiEndToEndTest extends AbstractDynamoDbLocalTest {
         assertEquals(1, updated.get("species").size());
         assertEquals(secondSpeciesId, updated.get("species").get(0).get("id").asText());
 
+        assertEquals(403, deleteRaw("/api/sightings/" + sightingId, user.token()).statusCode());
+        promoteToAdmin(user.userId());
         assertEquals(204, deleteRaw("/api/sightings/" + sightingId, user.token()).statusCode());
         JsonNode deleted = getJson("/api/sightings/" + sightingId, user.token(), 404);
         assertEquals(404, deleted.get("status").asInt());
@@ -398,6 +402,16 @@ class ApiEndToEndTest extends AbstractDynamoDbLocalTest {
 
     private HttpResponse<String> deleteRaw(String path, String token) throws Exception {
         return send("DELETE", path, null, token);
+    }
+
+    private void promoteToAdmin(String userId) {
+        dynamoDbClient.updateItem(request -> request
+                .tableName(USERS_TABLE)
+                .key(java.util.Map.of("pk", AttributeValue.builder().s(UserItem.keyFor(userId)).build()))
+                .updateExpression("SET #role = :role")
+                .expressionAttributeNames(java.util.Map.of("#role", "role"))
+                .expressionAttributeValues(java.util.Map.of(
+                        ":role", AttributeValue.builder().s("ADMIN").build())));
     }
 
     private HttpResponse<String> send(String method, String path, String body, String token) throws Exception {

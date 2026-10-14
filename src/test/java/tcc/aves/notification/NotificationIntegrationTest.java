@@ -19,6 +19,7 @@ import tcc.aves.repository.UserRepository;
 import tcc.aves.security.JwtUtil;
 import tcc.aves.repository.dynamodb.model.NotificationJobItem;
 import tcc.aves.repository.dynamodb.NotificationRepositoryDynamoDbAdapter;
+import tcc.aves.repository.dynamodb.model.UserItem;
 import tcc.aves.support.AbstractDynamoDbLocalTest;
 import tools.jackson.databind.ObjectMapper;
 
@@ -654,8 +655,19 @@ class NotificationIntegrationTest extends AbstractDynamoDbLocalTest {
             assertEquals("1", getItem("notification-test-species", "SPECIES#" + speciesId).get("referenceCount").n());
             assertEquals(200, http("PUT", "/api/sightings/" + id, alice, body.replace("10:00:00", "11:00:00")).statusCode());
             assertEquals(1, repository.dueJobs(Instant.now().plusSeconds(2), 10).size());
+            promoteToAdmin(alice);
             assertEquals(204, http("DELETE", "/api/sightings/" + id, alice, null).statusCode());
             assertEquals(1, repository.dueJobs(Instant.now().plusSeconds(2), 10).size());
         }
+    }
+
+    private void promoteToAdmin(UserRecord user) {
+        dynamoDbClient.updateItem(request -> request
+                .tableName("notification-test-users")
+                .key(Map.of("pk", AttributeValue.builder().s(UserItem.keyFor(user.id())).build()))
+                .updateExpression("SET #role = :role")
+                .expressionAttributeNames(Map.of("#role", "role"))
+                .expressionAttributeValues(Map.of(
+                        ":role", AttributeValue.builder().s("ADMIN").build())));
     }
 }

@@ -26,6 +26,7 @@ public class UserItem {
     private String email;
     private String emailNormalized;
     private String passwordHash;
+    private String role = "USER";
     private Instant createdAt;
     private Instant updatedAt;
     private Long version;
@@ -90,6 +91,14 @@ public class UserItem {
 
     public void setPasswordHash(String passwordHash) {
         this.passwordHash = passwordHash;
+    }
+
+    public String getRole() {
+        return role;
+    }
+
+    public void setRole(String role) {
+        this.role = role;
     }
 
     public Instant getCreatedAt() {

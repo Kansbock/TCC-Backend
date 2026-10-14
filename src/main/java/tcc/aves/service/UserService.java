@@ -47,7 +47,8 @@ public class UserService {
                 user.name(),
                 user.email(),
                 user.createdAt(),
-                user.updatedAt()
+                user.updatedAt(),
+                user.role()
         );
     }
 }

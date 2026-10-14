@@ -17,6 +17,7 @@ import tcc.aves.repository.UserRepository;
 import tcc.aves.repository.dynamodb.model.EmailReservationItem;
 import tcc.aves.repository.dynamodb.model.UserItem;
 import tcc.aves.repository.dynamodb.support.DynamoDbSupport;
+import tcc.aves.security.UserRole;
 
 import java.time.Instant;
 import java.util.Locale;
@@ -64,6 +65,7 @@ public class UserRepositoryDynamoDbAdapter implements UserRepository {
         user.setEmail(email);
         user.setEmailNormalized(normalized);
         user.setPasswordHash(passwordHash);
+        user.setRole(UserRole.USER.name());
         user.setCreatedAt(now);
         user.setUpdatedAt(now);
 
@@ -218,7 +220,8 @@ public class UserRepositoryDynamoDbAdapter implements UserRepository {
                 item.getEmail(),
                 item.getPasswordHash(),
                 item.getCreatedAt(),
-                item.getUpdatedAt()
+                item.getUpdatedAt(),
+                UserRole.fromStoredValue(item.getRole())
         );
     }
 }

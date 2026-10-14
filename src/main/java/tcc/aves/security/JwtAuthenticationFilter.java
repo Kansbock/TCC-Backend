@@ -5,6 +5,7 @@ import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
 import org.springframework.stereotype.Component;
@@ -61,10 +62,15 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
                 // Confirma que a conta ainda existe antes de autenticar.
                 userRepository.findById(userId).ifPresent(user -> {
-                    AuthenticatedUser principal = new AuthenticatedUser(user.id(), user.email());
+                    AuthenticatedUser principal = new AuthenticatedUser(user.id(), user.email(), user.role());
 
                     UsernamePasswordAuthenticationToken authentication =
-                            new UsernamePasswordAuthenticationToken(principal, null, List.of());
+                            new UsernamePasswordAuthenticationToken(
+                                    principal,
+                                    null,
+                                    user.role() == UserRole.ADMIN
+                                            ? List.of(new SimpleGrantedAuthority("ROLE_ADMIN"))
+                                            : List.of());
                     authentication.setDetails(
                             new WebAuthenticationDetailsSource().buildDetails(request));
 
