@@ -15,6 +15,10 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.context.WebApplicationContext;
 import tcc.aves.dto.SightingResponse;
 import tcc.aves.dto.SpeciesResponse;
+import tcc.aves.dto.DashboardChartPoint;
+import tcc.aves.dto.DashboardPeriod;
+import tcc.aves.dto.DashboardResponse;
+import tcc.aves.dto.DashboardSpeciesCount;
 import tcc.aves.exception.DuplicateResourceException;
 import tcc.aves.exception.ResourceNotFoundException;
 import tcc.aves.exception.ServiceUnavailableException;
@@ -25,6 +29,7 @@ import tcc.aves.security.UserRole;
 import tcc.aves.service.SightingService;
 import tcc.aves.service.SpeciesService;
 import tcc.aves.service.UserService;
+import tcc.aves.service.DashboardService;
 
 import java.time.Instant;
 import java.time.LocalDate;
@@ -64,6 +69,9 @@ class ControllerApiTest {
     private SightingService sightingService;
 
     @Autowired
+    private DashboardService dashboardService;
+
+    @Autowired
     private UserRepository userRepository;
 
     private MockMvc mockMvc;
@@ -73,7 +81,7 @@ class ControllerApiTest {
         mockMvc = MockMvcBuilders.webAppContextSetup(webApplicationContext)
                 .apply(springSecurity())
                 .build();
-        reset(userService, speciesService, sightingService, userRepository);
+        reset(userService, speciesService, sightingService, dashboardService, userRepository);
         when(userRepository.findById(SELF_ID)).thenReturn(Optional.of(userRecord(SELF_ID, EMAIL)));
         when(userRepository.findById(OTHER_ID)).thenReturn(Optional.of(userRecord(OTHER_ID, "other@example.com")));
         when(userRepository.findById(ADMIN_ID)).thenReturn(Optional.of(adminRecord(ADMIN_ID, ADMIN_EMAIL)));
@@ -124,6 +132,28 @@ class ControllerApiTest {
                 .andExpect(jsonPath("$", hasSize(1)))
                 .andExpect(jsonPath("$[0].id").value("sp-1"))
                 .andExpect(jsonPath("$[0].name").value("Arara"));
+    }
+
+    @Test
+    void dashboardReturnsTheSelectedPeriodAndSpeciesAggregation() throws Exception {
+        when(dashboardService.getDashboard(DashboardPeriod.LAST_30_DAYS, "sp-1")).thenReturn(
+                new DashboardResponse(
+                        4,
+                        2,
+                        List.of(new DashboardSpeciesCount("sp-1", "Arara", 3)),
+                        List.of(new DashboardChartPoint("01/10", 2)),
+                        List.of(new DashboardSpeciesCount("sp-1", "Arara", 3)),
+                        List.of(new DashboardChartPoint("09h", 2))
+                ));
+
+        mockMvc.perform(get("/api/dashboard")
+                        .param("period", "30")
+                        .param("speciesId", "sp-1")
+                        .header("Authorization", bearer(SELF_ID, EMAIL)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.totalSightings").value(4))
+                .andExpect(jsonPath("$.leadingSpecies[0].name").value("Arara"))
+                .andExpect(jsonPath("$.hourly[0].label").value("09h"));
     }
 
     @Test
@@ -370,6 +400,12 @@ class ControllerApiTest {
         @Primary
         SightingService sightingService() {
             return Mockito.mock(SightingService.class);
+        }
+
+        @Bean
+        @Primary
+        DashboardService dashboardService() {
+            return Mockito.mock(DashboardService.class);
         }
 
         @Bean
