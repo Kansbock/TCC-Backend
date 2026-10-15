@@ -165,7 +165,7 @@ public class DashboardService {
     private List<DateRange> dailyRanges(LocalDate from, LocalDate to) {
         List<DateRange> ranges = new ArrayList<>();
         for (LocalDate start = from; !start.isAfter(to); start = start.plusDays(1)) {
-            ranges.add(new DateRange(start, start, start.getDayOfMonth() + "/" + start.getMonthValue()));
+            ranges.add(new DateRange(start, start, rangeLabel(start, start)));
         }
         return ranges;
     }
@@ -177,7 +177,7 @@ public class DashboardService {
             if (end.isAfter(to)) {
                 end = to;
             }
-            ranges.add(new DateRange(start, end, start.getMonthValue() + "/" + String.valueOf(start.getYear()).substring(2)));
+            ranges.add(new DateRange(start, end, rangeLabel(start, end)));
             start = end.plusDays(1);
         }
         return ranges;
@@ -190,9 +190,27 @@ public class DashboardService {
         for (int index = 0; index < buckets; index++) {
             LocalDate start = from.plusDays(days * index / buckets);
             LocalDate end = from.plusDays(days * (index + 1) / buckets - 1);
-            ranges.add(new DateRange(start, end, start.getDayOfMonth() + "/" + start.getMonthValue()));
+            ranges.add(new DateRange(start, end, rangeLabel(start, end)));
         }
         return ranges;
+    }
+
+    private String rangeLabel(LocalDate start, LocalDate end) {
+        if (start.equals(end)) {
+            return dayAndMonth(start);
+        }
+        if (start.getYear() == end.getYear()) {
+            return dayAndMonth(start) + "–" + dayAndMonth(end);
+        }
+        return dayAndMonthAndYear(start) + "–" + dayAndMonthAndYear(end);
+    }
+
+    private String dayAndMonth(LocalDate date) {
+        return "%02d/%02d".formatted(date.getDayOfMonth(), date.getMonthValue());
+    }
+
+    private String dayAndMonthAndYear(LocalDate date) {
+        return "%02d/%02d/%02d".formatted(date.getDayOfMonth(), date.getMonthValue(), date.getYear() % 100);
     }
 
     private int countSightingsInRange(List<IdentifiedSighting> sightings, DateRange range) {

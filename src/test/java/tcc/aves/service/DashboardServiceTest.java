@@ -96,6 +96,20 @@ class DashboardServiceTest {
     }
 
     @Test
+    void labelsAggregatedTrendBucketsWithTheirFullDateRanges() {
+        when(sightingService.query(any(), any(), any(), any(), any(), eq(true), any())).thenReturn(
+                new CursorPage<>(List.of(
+                        sighting("inside-last-bucket", LocalDate.of(2026, 10, 10), LocalTime.NOON, arara())
+                ), null, false));
+
+        DashboardResponse response = dashboardService.getDashboard(DashboardPeriod.LAST_30_DAYS, null);
+
+        assertEquals(List.of("15/09–20/09", "21/09–26/09", "27/09–02/10", "03/10–08/10", "09/10–14/10"),
+                response.trend().stream().map(point -> point.label()).toList());
+        assertEquals(1, response.trend().getLast().value());
+    }
+
+    @Test
     void listsAllTiedLeadingSpeciesAlphabeticallyAndUsesUnboundedQueryForAllHistory() {
         when(sightingService.query(null, null, null, null, 50, true, "newest")).thenReturn(
                 new CursorPage<>(List.of(
