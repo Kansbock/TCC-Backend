@@ -81,6 +81,9 @@ import java.util.UUID;
 @Repository
 public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
 
+    private static final Set<String> UNIDENTIFIED_SPECIES_NAMES = Set.of(
+            "outros", "ave nao identificada", "especie nao identificada");
+
     private final DynamoDbEnhancedClient enhancedClient;
     private final DynamoDbTable<SightingItem> sightingTable;
     private final DynamoDbTable<SpeciesSightingRefItem> refTable;
@@ -191,7 +194,9 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
                     current.setUpdatedAt(now);
                     tx.addUpdateItem(speciesTable, current);
                 }
-                addNotificationJob(tx, id, now, distinctIds.size());
+                if (hasIdentifiedSpecies(species)) {
+                    addNotificationJob(tx, id, now, distinctIds.size());
+                }
             } else if (!replay) {
                 List<String> urls = new ArrayList<>(photos(sighting));
                 urls.add(imageUrl);
@@ -244,6 +249,13 @@ public class SightingRepositoryDynamoDbAdapter implements SightingRepository {
             tx.addPutItem(notificationJobs, TransactPutItemEnhancedRequest.builder(NotificationJobItem.class)
                     .item(NotificationJobItem.create(id, at, pending)).conditionExpression(notExists()).build());
         }
+    }
+
+    private boolean hasIdentifiedSpecies(Map<String, SpeciesItem> species) {
+        return species.values().stream()
+                .map(SpeciesItem::getCommonName)
+                .map(this::normalizeSpeciesName)
+                .anyMatch(name -> !UNIDENTIFIED_SPECIES_NAMES.contains(name));
     }
 
     @Override

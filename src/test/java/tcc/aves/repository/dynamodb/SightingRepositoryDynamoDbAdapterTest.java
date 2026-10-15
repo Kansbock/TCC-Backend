@@ -14,6 +14,7 @@ import tcc.aves.repository.SightingSort;
 import tcc.aves.repository.SpeciesRecord;
 import tcc.aves.repository.dynamodb.model.SightingIdempotencyItem;
 import tcc.aves.repository.dynamodb.model.SightingItem;
+import tcc.aves.repository.dynamodb.model.NotificationJobItem;
 import tcc.aves.repository.dynamodb.model.SpeciesItem;
 import tcc.aves.repository.dynamodb.model.SpeciesSightingRefItem;
 import tcc.aves.repository.dynamodb.support.SightingCursorCodec;
@@ -130,6 +131,43 @@ class SightingRepositoryDynamoDbAdapterTest extends AbstractDynamoDbLocalTest {
                         "worker-key-3", List.of(arara.id()), LocalDate.of(2026, 9, 10), LocalTime.of(10, 15), "https://sighting/DIFFERENT"));
 
         assertEquals("Idempotency-Key já foi usada com uma requisição diferente", exception.getMessage());
+    }
+
+    @Test
+    void createDoesNotQueueNotificationsForUnidentifiedOnlySightings() {
+        for (int index = 0; index < 3; index++) {
+            String name = List.of("Outros", "Ave não identificada", "Espécie não identificada").get(index);
+            SpeciesRecord species = speciesRepository.create(
+                    name, "Avis incognita " + index, "Desc", "Tips", "https://img/" + index);
+
+            SightingRecord created = sightingRepository.create(
+                    List.of(species.id()),
+                    LocalDate.of(2026, 9, 10),
+                    LocalTime.of(10, 15, index),
+                    "https://sighting/unidentified-" + index);
+
+            assertTrue(getItem(SIGHTINGS_TABLE, NotificationJobItem.PENDING,
+                    NotificationJobItem.order(created.createdAt(), created.id())).isEmpty());
+            assertTrue(getItem(SIGHTINGS_TABLE, "NOTIF#EVENT#" + created.id(), "STATE").isEmpty());
+        }
+    }
+
+    @Test
+    void createQueuesNotificationsForMixedSightingsWithAnIdentifiedSpecies() {
+        SpeciesRecord unidentified = speciesRepository.create(
+                "Ave não identificada", "Avis incognita", "Desc", "Tips", "https://img/u");
+        SpeciesRecord arara = speciesRepository.create(
+                "Arara", "Ara ararauna", "Desc", "Tips", "https://img/a");
+
+        SightingRecord created = sightingRepository.create(
+                List.of(unidentified.id(), arara.id()),
+                LocalDate.of(2026, 9, 10),
+                LocalTime.of(10, 15),
+                "https://sighting/mixed");
+
+        assertFalse(getItem(SIGHTINGS_TABLE, NotificationJobItem.PENDING,
+                NotificationJobItem.order(created.createdAt(), created.id())).isEmpty());
+        assertFalse(getItem(SIGHTINGS_TABLE, "NOTIF#EVENT#" + created.id(), "STATE").isEmpty());
     }
 
     @Test

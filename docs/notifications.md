@@ -7,7 +7,10 @@ referências de espécies e dois itens de outbox na tabela **existente**
 `aves-sightings`: fila pendente e estado do evento. O caminho idempotente
 também inclui a reserva original; replay/conflito não deixa trabalho órfão.
 São `4 + 2 × espécies` ações no caminho idempotente, limitadas a 100.
-Edição, exclusão e replay não criam outra outbox. Não importar dados anteriores.
+Edição, exclusão e replay não criam outra outbox. Avistamentos compostos apenas
+por `Outros`, `Ave não identificada` ou `Espécie não identificada` não criam
+outbox nem geram alerta; em registros mistos, a presença de uma espécie
+identificada mantém a notificação. Não importar dados anteriores.
 
 O worker chama `POST /api/internal/notification-jobs/process` antes e depois
 de cada ciclo, inclusive sem fotos. A **Lambda HTTP existente** executa o lote
