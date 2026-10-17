@@ -38,6 +38,10 @@ public final class DynamoDbSupport {
         return CONDITIONAL_CHECK_FAILED.equals(reasons.get(index).code());
     }
 
+    public static boolean hasConditionFailure(List<CancellationReason> reasons) {
+        return reasons.stream().anyMatch(reason -> CONDITIONAL_CHECK_FAILED.equals(reason.code()));
+    }
+
     /**
      * Traduz falhas genéricas (não condicionais) do DynamoDB — throttling,
      * indisponibilidade, erros de conectividade — em

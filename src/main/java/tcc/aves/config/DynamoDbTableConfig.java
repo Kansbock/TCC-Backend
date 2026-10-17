@@ -8,6 +8,7 @@ import software.amazon.awssdk.enhanced.dynamodb.DynamoDbTable;
 import software.amazon.awssdk.enhanced.dynamodb.TableSchema;
 import tcc.aves.repository.dynamodb.model.EmailReservationItem;
 import tcc.aves.repository.dynamodb.model.ScientificNameReservationItem;
+import tcc.aves.repository.dynamodb.model.SightingIdempotencyItem;
 import tcc.aves.repository.dynamodb.model.SightingItem;
 import tcc.aves.repository.dynamodb.model.SpeciesItem;
 import tcc.aves.repository.dynamodb.model.SpeciesSightingRefItem;
@@ -58,5 +59,16 @@ public class DynamoDbTableConfig {
     @Bean
     public DynamoDbIndex<SightingItem> sightingTimelineIndex(DynamoDbTable<SightingItem> sightingTable) {
         return sightingTable.index(SightingItem.TIMELINE_INDEX_NAME);
+    }
+
+    @Bean
+    public DynamoDbIndex<SightingItem> sightingPrimarySpeciesIndex(DynamoDbTable<SightingItem> sightingTable) {
+        return sightingTable.index(SightingItem.PRIMARY_SPECIES_INDEX_NAME);
+    }
+
+    @Bean
+    public DynamoDbTable<SightingIdempotencyItem> sightingIdempotencyTable(
+            DynamoDbEnhancedClient client, DynamoDbProperties properties) {
+        return client.table(properties.sightingsTable(), TableSchema.fromBean(SightingIdempotencyItem.class));
     }
 }

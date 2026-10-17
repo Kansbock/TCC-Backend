@@ -12,6 +12,7 @@ import tcc.aves.repository.SightingPage;
 import tcc.aves.repository.SightingQuery;
 import tcc.aves.repository.SightingRecord;
 import tcc.aves.repository.SightingRepository;
+import tcc.aves.repository.SightingSort;
 import tcc.aves.repository.SpeciesRecord;
 import tcc.aves.repository.SpeciesRepository;
 
@@ -107,6 +108,41 @@ class SightingServiceTest {
     }
 
     @Test
+    void queryAcceptsTheRequestedSortAndHidesOutrosByDefault() {
+        SightingRecord identified = sightingRecord("sig-identified", List.of("sp-arara"), LocalDate.of(2026, 9, 10), LocalTime.NOON);
+        SightingRecord unidentified = sightingRecord("sig-other", List.of("sp-other"), LocalDate.of(2026, 9, 9), LocalTime.NOON);
+        when(sightingRepository.query(any())).thenReturn(new SightingPage(List.of(identified, unidentified), null, false));
+        when(speciesRepository.findAll()).thenReturn(List.of(
+                speciesRecord("sp-other", "Ave não identificada", "Avis incognita")));
+        when(speciesRepository.findAllByIds(any())).thenReturn(speciesMap(
+                speciesRecord("sp-arara", "Arara", "Ara ararauna"),
+                speciesRecord("sp-other", "Outros", "Avis incognita")));
+
+        CursorPage<SightingResponse> page = sightingService.query(
+                null, null, null, null, 3, false, "species_asc");
+
+        assertEquals(List.of("sig-identified"), page.items().stream().map(SightingResponse::id).toList());
+        verify(sightingRepository).query(
+                new SightingQuery(null, null, null, null, 3, SightingSort.SPECIES_ASC));
+    }
+
+    @Test
+    void queryIncludesOutrosWhenRequestedAndRejectsUnknownSort() {
+        SightingRecord unidentified = sightingRecord("sig-other", List.of("sp-other"), LocalDate.of(2026, 9, 9), LocalTime.NOON);
+        when(sightingRepository.query(any())).thenReturn(new SightingPage(List.of(unidentified), null, false));
+        when(speciesRepository.findAllByIds(any())).thenReturn(speciesMap(
+                speciesRecord("sp-other", "Outros", "Avis incognita")));
+
+        CursorPage<SightingResponse> page = sightingService.query(
+                null, null, null, null, 3, true, "newest");
+        assertEquals(List.of("sig-other"), page.items().stream().map(SightingResponse::id).toList());
+
+        IllegalArgumentException exception = assertThrows(IllegalArgumentException.class,
+                () -> sightingService.query(null, null, null, null, 3, false, "invalid"));
+        assertEquals("Ordenação de avistamentos inválida", exception.getMessage());
+    }
+
+    @Test
     void findByIdThrowsWhenSightingIsMissing() {
         when(sightingRepository.findById("missing")).thenReturn(Optional.empty());
 
@@ -162,6 +198,36 @@ class SightingServiceTest {
 
         assertEquals(List.of("sp-1", "sp-2"), created.species().stream().map(SpeciesResponse::id).toList());
         assertEquals(List.of("sp-1", "sp-2"), updated.species().stream().map(SpeciesResponse::id).toList());
+    }
+
+    @Test
+    void createWithIdempotencyKeyDelegatesToRepositoryIdempotentPath() {
+        SightingRequest request = request(List.of("sp-1"));
+        SightingRecord saved = sightingRecord("sig-1", List.of("sp-1"), request.date(), request.time());
+        when(sightingRepository.createIdempotent("worker-key", request.speciesIds(), request.date(), request.time(), request.imageUrl()))
+                .thenReturn(saved);
+        when(speciesRepository.findAllByIds(List.of("sp-1"))).thenReturn(speciesMap(
+                speciesRecord("sp-1", "Arara", "Ara ararauna")));
+
+        SightingResponse created = sightingService.create(request, "worker-key");
+
+        assertEquals(List.of("sp-1"), created.species().stream().map(SpeciesResponse::id).toList());
+        verify(sightingRepository, never()).create(any(), any(), any(), any());
+    }
+
+    @Test
+    void createWithoutIdempotencyKeyFallsBackToLegacyBehavior() {
+        SightingRequest request = request(List.of("sp-1"));
+        SightingRecord saved = sightingRecord("sig-1", List.of("sp-1"), request.date(), request.time());
+        when(sightingRepository.create(request.speciesIds(), request.date(), request.time(), request.imageUrl())).thenReturn(saved);
+        when(speciesRepository.findAllByIds(List.of("sp-1"))).thenReturn(speciesMap(
+                speciesRecord("sp-1", "Arara", "Ara ararauna")));
+
+        sightingService.create(request, null);
+        sightingService.create(request, "  ");
+
+        verify(sightingRepository, times(2)).create(request.speciesIds(), request.date(), request.time(), request.imageUrl());
+        verify(sightingRepository, never()).createIdempotent(any(), any(), any(), any(), any());
     }
 
     @Test

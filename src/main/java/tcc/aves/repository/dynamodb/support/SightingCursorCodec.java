@@ -62,12 +62,13 @@ public class SightingCursorCodec {
 
     private <T> String encode(T value) {
         byte[] json = objectMapper.writeValueAsBytes(value);
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(json);
+        return "g1." + Base64.getUrlEncoder().withoutPadding().encodeToString(json);
     }
 
     private <T> T decode(String cursor, Class<T> type) {
         try {
-            byte[] json = Base64.getUrlDecoder().decode(cursor);
+            if (!cursor.startsWith("g1.")) throw new IllegalArgumentException("Cursor anterior ao agrupamento");
+            byte[] json = Base64.getUrlDecoder().decode(cursor.substring(3));
             return objectMapper.readValue(json, type);
         } catch (Exception e) {
             throw new IllegalArgumentException("Cursor de paginação inválido");

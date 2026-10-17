@@ -10,6 +10,7 @@ import tcc.aves.repository.UserRecord;
 import tcc.aves.repository.dynamodb.model.EmailReservationItem;
 import tcc.aves.repository.dynamodb.model.UserItem;
 import tcc.aves.support.AbstractDynamoDbLocalTest;
+import tcc.aves.security.UserRole;
 
 import java.util.Map;
 
@@ -52,6 +53,8 @@ class UserRepositoryDynamoDbAdapterTest extends AbstractDynamoDbLocalTest {
 
         assertEquals(created.id(), userItem.get("id").s());
         assertEquals(" Alice@Example.com ", userItem.get("email").s());
+        assertEquals(UserRole.USER.name(), userItem.get("role").s());
+        assertEquals(UserRole.USER, created.role());
         assertEquals(created.id(), reservation.get("userId").s());
         assertEquals(2, countItems(USERS_TABLE));
     }

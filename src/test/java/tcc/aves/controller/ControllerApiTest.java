@@ -15,15 +15,21 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.context.WebApplicationContext;
 import tcc.aves.dto.SightingResponse;
 import tcc.aves.dto.SpeciesResponse;
+import tcc.aves.dto.DashboardChartPoint;
+import tcc.aves.dto.DashboardPeriod;
+import tcc.aves.dto.DashboardResponse;
+import tcc.aves.dto.DashboardSpeciesCount;
 import tcc.aves.exception.DuplicateResourceException;
 import tcc.aves.exception.ResourceNotFoundException;
 import tcc.aves.exception.ServiceUnavailableException;
 import tcc.aves.repository.UserRecord;
 import tcc.aves.repository.UserRepository;
 import tcc.aves.security.JwtUtil;
+import tcc.aves.security.UserRole;
 import tcc.aves.service.SightingService;
 import tcc.aves.service.SpeciesService;
 import tcc.aves.service.UserService;
+import tcc.aves.service.DashboardService;
 
 import java.time.Instant;
 import java.time.LocalDate;
@@ -43,7 +49,9 @@ class ControllerApiTest {
 
     private static final String SELF_ID = "user-self";
     private static final String OTHER_ID = "user-other";
+    private static final String ADMIN_ID = "user-admin";
     private static final String EMAIL = "self@example.com";
+    private static final String ADMIN_EMAIL = "admin@example.com";
 
     @Autowired
     private WebApplicationContext webApplicationContext;
@@ -61,6 +69,9 @@ class ControllerApiTest {
     private SightingService sightingService;
 
     @Autowired
+    private DashboardService dashboardService;
+
+    @Autowired
     private UserRepository userRepository;
 
     private MockMvc mockMvc;
@@ -70,9 +81,10 @@ class ControllerApiTest {
         mockMvc = MockMvcBuilders.webAppContextSetup(webApplicationContext)
                 .apply(springSecurity())
                 .build();
-        reset(userService, speciesService, sightingService, userRepository);
+        reset(userService, speciesService, sightingService, dashboardService, userRepository);
         when(userRepository.findById(SELF_ID)).thenReturn(Optional.of(userRecord(SELF_ID, EMAIL)));
         when(userRepository.findById(OTHER_ID)).thenReturn(Optional.of(userRecord(OTHER_ID, "other@example.com")));
+        when(userRepository.findById(ADMIN_ID)).thenReturn(Optional.of(adminRecord(ADMIN_ID, ADMIN_EMAIL)));
     }
 
     @Test
@@ -123,6 +135,28 @@ class ControllerApiTest {
     }
 
     @Test
+    void dashboardReturnsTheSelectedPeriodAndSpeciesAggregation() throws Exception {
+        when(dashboardService.getDashboard(DashboardPeriod.LAST_30_DAYS, "sp-1")).thenReturn(
+                new DashboardResponse(
+                        4,
+                        2,
+                        List.of(new DashboardSpeciesCount("sp-1", "Arara", 3)),
+                        List.of(new DashboardChartPoint("01/10", 2)),
+                        List.of(new DashboardSpeciesCount("sp-1", "Arara", 3)),
+                        List.of(new DashboardChartPoint("09h", 2))
+                ));
+
+        mockMvc.perform(get("/api/dashboard")
+                        .param("period", "30")
+                        .param("speciesId", "sp-1")
+                        .header("Authorization", bearer(SELF_ID, EMAIL)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.totalSightings").value(4))
+                .andExpect(jsonPath("$.leadingSpecies[0].name").value("Arara"))
+                .andExpect(jsonPath("$.hourly[0].label").value("09h"));
+    }
+
+    @Test
     void healthEndpointWorksWithoutTokenAndDoesNotUseServices() throws Exception {
         mockMvc.perform(get("/health"))
                 .andExpect(status().isOk())
@@ -165,7 +199,7 @@ class ControllerApiTest {
 
     @Test
     void serviceUnavailableReturnsServiceUnavailableApiError() throws Exception {
-        when(sightingService.query(null, null, null, null, null))
+        when(sightingService.query(null, null, null, null, null, false, null))
                 .thenThrow(new ServiceUnavailableException("Dynamo down"));
 
         mockMvc.perform(get("/api/sightings")
@@ -217,6 +251,118 @@ class ControllerApiTest {
                 .andExpect(jsonPath("$.species[0].id").value("sp-1"));
     }
 
+    @Test
+    void createSightingWithoutIdempotencyKeyUsesLegacyServiceMethod() throws Exception {
+        SightingResponse response = sightingResponse();
+        when(sightingService.create(any())).thenReturn(response);
+
+        mockMvc.perform(post("/api/sightings")
+                        .header("Authorization", bearer(SELF_ID, EMAIL))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(sightingRequestJson()))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.id").value("sig-1"));
+
+        verify(sightingService).create(any());
+        verify(sightingService, never()).create(any(), anyString());
+    }
+
+    @Test
+    void createSightingWithIdempotencyKeyHeaderUsesIdempotentServiceMethod() throws Exception {
+        SightingResponse response = sightingResponse();
+        when(sightingService.create(any(), eq("worker-key-123"))).thenReturn(response);
+
+        mockMvc.perform(post("/api/sightings")
+                        .header("Authorization", bearer(SELF_ID, EMAIL))
+                        .header("Idempotency-Key", "worker-key-123")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(sightingRequestJson()))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.id").value("sig-1"));
+
+        verify(sightingService).create(any(), eq("worker-key-123"));
+        verify(sightingService, never()).create(any());
+    }
+
+    @Test
+    void createSightingReusedIdempotencyKeyWithDifferentPayloadReturnsConflict() throws Exception {
+        when(sightingService.create(any(), eq("worker-key-456")))
+                .thenThrow(new DuplicateResourceException("Idempotency-Key já foi usada com uma requisição diferente"));
+
+        mockMvc.perform(post("/api/sightings")
+                        .header("Authorization", bearer(SELF_ID, EMAIL))
+                        .header("Idempotency-Key", "worker-key-456")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(sightingRequestJson()))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.status").value(409))
+                .andExpect(jsonPath("$.message").value("Idempotency-Key já foi usada com uma requisição diferente"));
+    }
+
+    @Test
+    void onlyAdministratorsCanDeleteSightings() throws Exception {
+        mockMvc.perform(delete("/api/sightings/{id}", "sig-1")
+                        .header("Authorization", bearer(SELF_ID, EMAIL)))
+                .andExpect(status().isForbidden());
+        verify(sightingService, never()).delete(anyString());
+
+        mockMvc.perform(delete("/api/sightings/{id}", "sig-1")
+                        .header("Authorization", bearer(ADMIN_ID, ADMIN_EMAIL)))
+                .andExpect(status().isNoContent());
+        verify(sightingService).delete("sig-1");
+    }
+
+    private static SightingResponse sightingResponse() {
+        Instant now = Instant.parse("2026-09-10T12:30:00Z");
+        return new SightingResponse(
+                "sig-1",
+                List.of(speciesResponse("sp-1", "Arara", "Ara ararauna")),
+                LocalDate.of(2026, 9, 10),
+                LocalTime.of(10, 15),
+                "https://img/sig-1",
+                now,
+                now);
+    }
+
+    private static String sightingRequestJson() {
+        return """
+                {
+                  "speciesIds": ["sp-1"],
+                  "date": "2026-09-10",
+                  "time": "10:15:00",
+                  "imageUrl": "https://img/sig-1"
+                }
+                """;
+    }
+
+    @Test
+    void maintenanceBlocksSightingWritesButKeepsReadsAvailable() throws Exception {
+        SightingController controller = webApplicationContext.getBean(SightingController.class);
+        Object previous = org.springframework.test.util.ReflectionTestUtils.getField(controller, "writesPaused");
+        org.springframework.test.util.ReflectionTestUtils.setField(controller, "writesPaused", true);
+        String body = """
+                {"speciesIds":["synthetic-species"],"date":"2026-09-10","time":"10:15:00","imageUrl":"https://synthetic.test/photo"}
+                """;
+        try {
+            mockMvc.perform(post("/api/sightings").header("Authorization", bearer(SELF_ID, EMAIL))
+                            .contentType(MediaType.APPLICATION_JSON).content(body))
+                    .andExpect(status().isServiceUnavailable()).andExpect(jsonPath("$.status").value(503));
+            mockMvc.perform(put("/api/sightings/sig-1").header("Authorization", bearer(SELF_ID, EMAIL))
+                            .contentType(MediaType.APPLICATION_JSON).content(body))
+                    .andExpect(status().isServiceUnavailable());
+            mockMvc.perform(delete("/api/sightings/sig-1").header("Authorization", bearer(ADMIN_ID, ADMIN_EMAIL)))
+                    .andExpect(status().isServiceUnavailable());
+            verifyNoInteractions(sightingService);
+            Instant now = Instant.parse("2026-09-10T10:15:00Z");
+            when(sightingService.findById("sig-1")).thenReturn(new SightingResponse(
+                    "sig-1", List.of(), LocalDate.of(2026, 9, 10), LocalTime.of(10, 15), null, now, now));
+            mockMvc.perform(get("/api/sightings/sig-1").header("Authorization", bearer(SELF_ID, EMAIL)))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.id").value("sig-1"));
+        } finally {
+            org.springframework.test.util.ReflectionTestUtils.setField(controller, "writesPaused", previous);
+        }
+    }
+
     private String bearer(String userId, String email) {
         return "Bearer " + jwtUtil.generateToken(userId, email);
     }
@@ -224,6 +370,11 @@ class ControllerApiTest {
     private static UserRecord userRecord(String id, String email) {
         Instant now = Instant.parse("2026-09-10T12:30:00Z");
         return new UserRecord(id, "User " + id, email, "hash", now, now);
+    }
+
+    private static UserRecord adminRecord(String id, String email) {
+        Instant now = Instant.parse("2026-09-10T12:30:00Z");
+        return new UserRecord(id, "Admin " + id, email, "hash", now, now, UserRole.ADMIN);
     }
 
     private static SpeciesResponse speciesResponse(String id, String name, String scientificName) {
@@ -249,6 +400,12 @@ class ControllerApiTest {
         @Primary
         SightingService sightingService() {
             return Mockito.mock(SightingService.class);
+        }
+
+        @Bean
+        @Primary
+        DashboardService dashboardService() {
+            return Mockito.mock(DashboardService.class);
         }
 
         @Bean

@@ -2,7 +2,6 @@ package tcc.aves.e2e;
 
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -11,6 +10,8 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.TestPropertySource;
 import org.testcontainers.junit.jupiter.Testcontainers;
+import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
+import tcc.aves.repository.dynamodb.model.UserItem;
 import tcc.aves.security.JwtUtil;
 import tcc.aves.support.AbstractDynamoDbLocalTest;
 import tools.jackson.databind.JsonNode;
@@ -31,7 +32,6 @@ import static org.junit.jupiter.api.Assertions.*;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Testcontainers(disabledWithoutDocker = true)
-@Disabled("Requires the amazon/dynamodb-local Docker image, which this environment cannot pull/run reliably.")
 @TestPropertySource(properties = {
         "jwt.secret=test-only-secret-key-not-for-production-use-1234567890",
         "jwt.expiration=60000"
@@ -45,6 +45,7 @@ class ApiEndToEndTest extends AbstractDynamoDbLocalTest {
 
     @DynamicPropertySource
     static void dynamoDbProperties(DynamicPropertyRegistry registry) {
+        DYNAMODB_LOCAL.start();
         System.setProperty("aws.accessKeyId", "test");
         System.setProperty("aws.secretAccessKey", "test");
         registry.add("aws.region", () -> REGION);
@@ -231,6 +232,8 @@ class ApiEndToEndTest extends AbstractDynamoDbLocalTest {
         assertEquals(1, updated.get("species").size());
         assertEquals(secondSpeciesId, updated.get("species").get(0).get("id").asText());
 
+        assertEquals(403, deleteRaw("/api/sightings/" + sightingId, user.token()).statusCode());
+        promoteToAdmin(user.userId());
         assertEquals(204, deleteRaw("/api/sightings/" + sightingId, user.token()).statusCode());
         JsonNode deleted = getJson("/api/sightings/" + sightingId, user.token(), 404);
         assertEquals(404, deleted.get("status").asInt());
@@ -262,13 +265,43 @@ class ApiEndToEndTest extends AbstractDynamoDbLocalTest {
     }
 
     @Test
+    void minuteGroupingGalleryCapacityAndCorrectionConflictsAreVisibleOverHttp() throws Exception {
+        Session user = registerAndLogin("grouping@example.test", "synthetic-password");
+        String speciesId = createSpecies(user.token(), "Synthetic bird", "Synthetic avis");
+        List<String> ids = new java.util.ArrayList<>();
+        for (int i = 0; i < 5; i++) ids.add(createSighting(user.token(), speciesId, "2026-09-10", "10:15:0" + i));
+        assertEquals(1, ids.subList(0, 4).stream().distinct().count());
+        assertNotEquals(ids.getFirst(), ids.get(4));
+        JsonNode first = getJson("/api/sightings/" + ids.getFirst(), user.token(), 200);
+        assertEquals(4, first.get("imageUrls").size());
+        assertEquals(first.get("imageUrls").get(0).asText(), first.get("imageUrl").asText());
+        assertTrue(first.get("time").asText().startsWith("10:15"));
+        JsonNode page = getJson("/api/sightings?speciesId=" + speciesId + "&from=2026-09-10&to=2026-09-10", user.token(), 200);
+        assertEquals(2, page.get("items").size());
+        String elsewhere = createSighting(user.token(), speciesId, "2026-09-10", "10:16:00");
+        putJson("/api/sightings/" + elsewhere, """
+                {"speciesIds":["%s"],"date":"2026-09-10","time":"10:15:59","imageUrl":"https://synthetic.test/correction"}
+                """.formatted(speciesId), user.token(), 409);
+        JsonNode replaced = putJson("/api/sightings/" + ids.getFirst(), """
+                {"speciesIds":["%s"],"date":"2026-09-10","time":"10:15:00","imageUrls":["https://synthetic.test/replacement"]}
+                """.formatted(speciesId), user.token(), 200);
+        assertEquals(1, replaced.get("imageUrls").size());
+        assertEquals("https://synthetic.test/replacement", replaced.get("imageUrl").asText());
+        putJson("/api/sightings/" + ids.getFirst(), """
+                {"speciesIds":["%s"],"date":"2026-09-10","time":"10:15:00",
+                 "imageUrls":["https://synthetic.test/1","https://synthetic.test/2","https://synthetic.test/3","https://synthetic.test/4","https://synthetic.test/5"]}
+                """.formatted(speciesId), user.token(), 400);
+        getJson("/api/sightings?cursor=legacy-cursor", user.token(), 400);
+    }
+
+    @Test
     void sightingCombinedFiltersWorkAndPartialDateRangeIsRejected() throws Exception {
         Session user = registerAndLogin("filters@example.com", "secret1");
         String araraId = createSpecies(user.token(), "Arara", "Ara ararauna");
         String tucanoId = createSpecies(user.token(), "Tucano", "Ramphastos toco");
 
         String augustHalfSecond = createSighting(user.token(), List.of(araraId), "2026-08-31", "23:59:59.500");
-        String augustWholeSecond = createSighting(user.token(), List.of(araraId, tucanoId), "2026-08-31", "23:59:59.000");
+        String augustWholeSecond = createSighting(user.token(), List.of(araraId, tucanoId), "2026-08-31", "23:58:59.000");
         createSighting(user.token(), List.of(tucanoId), "2026-09-01", "00:00:00");
 
         JsonNode filtered = getJson("/api/sightings?speciesId=" + araraId + "&from=2026-08-31&to=2026-08-31", user.token(), 200);
@@ -369,6 +402,16 @@ class ApiEndToEndTest extends AbstractDynamoDbLocalTest {
 
     private HttpResponse<String> deleteRaw(String path, String token) throws Exception {
         return send("DELETE", path, null, token);
+    }
+
+    private void promoteToAdmin(String userId) {
+        dynamoDbClient.updateItem(request -> request
+                .tableName(USERS_TABLE)
+                .key(java.util.Map.of("pk", AttributeValue.builder().s(UserItem.keyFor(userId)).build()))
+                .updateExpression("SET #role = :role")
+                .expressionAttributeNames(java.util.Map.of("#role", "role"))
+                .expressionAttributeValues(java.util.Map.of(
+                        ":role", AttributeValue.builder().s("ADMIN").build())));
     }
 
     private HttpResponse<String> send(String method, String path, String body, String token) throws Exception {

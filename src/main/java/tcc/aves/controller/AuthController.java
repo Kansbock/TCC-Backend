@@ -43,7 +43,8 @@ public class AuthController {
                 user.name(),
                 user.email(),
                 user.createdAt(),
-                user.updatedAt()
+                user.updatedAt(),
+                user.role()
         );
         return ResponseEntity.ok(new LoginResponse(token, userResponse));
     }

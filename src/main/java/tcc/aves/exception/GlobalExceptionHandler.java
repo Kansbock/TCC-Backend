@@ -15,6 +15,7 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
+import org.springframework.web.server.ResponseStatusException;
 import tcc.aves.dto.ApiError;
 
 import java.util.LinkedHashMap;
@@ -77,6 +78,13 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiError> handleIllegalArgument(IllegalArgumentException ex,
                                                           HttpServletRequest request) {
         return build(HttpStatus.BAD_REQUEST, ex.getMessage(), request);
+    }
+
+    @ExceptionHandler(ResponseStatusException.class)
+    public ResponseEntity<ApiError> handleStatus(ResponseStatusException ex, HttpServletRequest request) {
+        log.warn("Falha de configuração/operação em {} {}: {}", request.getMethod(),
+                request.getRequestURI(), ex.getStatusCode().value());
+        return build(HttpStatus.valueOf(ex.getStatusCode().value()), ex.getReason(), request);
     }
 
     /** Validação dos DTOs de entrada (@Valid no corpo da requisição). */

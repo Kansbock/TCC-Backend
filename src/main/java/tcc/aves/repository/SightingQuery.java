@@ -16,6 +16,10 @@ public record SightingQuery(
         LocalDate from,
         LocalDate to,
         String cursor,
-        int limit
+        int limit,
+        SightingSort sort
 ) {
+    public SightingQuery(String speciesId, LocalDate from, LocalDate to, String cursor, int limit) {
+        this(speciesId, from, to, cursor, limit, SightingSort.NEWEST);
+    }
 }

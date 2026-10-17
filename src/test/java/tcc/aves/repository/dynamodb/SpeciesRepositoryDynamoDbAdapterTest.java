@@ -52,6 +52,7 @@ class SpeciesRepositoryDynamoDbAdapterTest extends AbstractDynamoDbLocalTest {
                 speciesSightingRefTable(SIGHTINGS_TABLE),
                 sightingTimelineIndex(SIGHTINGS_TABLE),
                 speciesTable(SPECIES_TABLE),
+                sightingIdempotencyTable(SIGHTINGS_TABLE),
                 new SightingProperties(20, 50, 20, 60),
                 new SightingCursorCodec(new ObjectMapper()));
     }

@@ -7,5 +7,5 @@ package tcc.aves.security;
  * propriedade da conta sem uma consulta extra ao banco em cada controller
  * (ver {@code @PreAuthorize("#id == principal.id")} em {@code UserController}).
  */
-public record AuthenticatedUser(String id, String email) {
+public record AuthenticatedUser(String id, String email, UserRole role) {
 }

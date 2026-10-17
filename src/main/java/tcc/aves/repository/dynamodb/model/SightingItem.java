@@ -33,7 +33,9 @@ public class SightingItem {
     public static final String KEY_PREFIX = "SIGHTING#";
     public static final String DETAILS_SORT_KEY = "DETAILS";
     public static final String TIMELINE_INDEX_NAME = "timeline-index";
+    public static final String PRIMARY_SPECIES_INDEX_NAME = "primary-species-index";
     public static final String TIMELINE_PK_PREFIX = "SIGHTINGS#";
+    public static final String PRIMARY_SPECIES_PK = "SIGHTINGS#PRIMARY_SPECIES";
 
     private String pk;
     private String sk = DETAILS_SORT_KEY;
@@ -42,10 +44,15 @@ public class SightingItem {
     private LocalDate date;
     private LocalTime time;
     private String imageUrl;
+    private List<String> imageUrls;
+    private String groupKey;
+    private Long groupSequence;
     private List<String> speciesIds;
     private Instant observedAt;
     private String timelinePk;
     private String timelineSk;
+    private String primarySpeciesPk;
+    private String primarySpeciesSk;
     private Instant createdAt;
     private Instant updatedAt;
     private Long version;
@@ -112,6 +119,13 @@ public class SightingItem {
         this.imageUrl = imageUrl;
     }
 
+    public List<String> getImageUrls() { return imageUrls; }
+    public void setImageUrls(List<String> imageUrls) { this.imageUrls = imageUrls; }
+    public String getGroupKey() { return groupKey; }
+    public void setGroupKey(String groupKey) { this.groupKey = groupKey; }
+    public Long getGroupSequence() { return groupSequence; }
+    public void setGroupSequence(Long groupSequence) { this.groupSequence = groupSequence; }
+
     public List<String> getSpeciesIds() {
         return speciesIds;
     }
@@ -144,6 +158,24 @@ public class SightingItem {
 
     public void setTimelineSk(String timelineSk) {
         this.timelineSk = timelineSk;
+    }
+
+    @DynamoDbSecondaryPartitionKey(indexNames = PRIMARY_SPECIES_INDEX_NAME)
+    public String getPrimarySpeciesPk() {
+        return primarySpeciesPk;
+    }
+
+    public void setPrimarySpeciesPk(String primarySpeciesPk) {
+        this.primarySpeciesPk = primarySpeciesPk;
+    }
+
+    @DynamoDbSecondarySortKey(indexNames = PRIMARY_SPECIES_INDEX_NAME)
+    public String getPrimarySpeciesSk() {
+        return primarySpeciesSk;
+    }
+
+    public void setPrimarySpeciesSk(String primarySpeciesSk) {
+        this.primarySpeciesSk = primarySpeciesSk;
     }
 
     public Instant getCreatedAt() {
